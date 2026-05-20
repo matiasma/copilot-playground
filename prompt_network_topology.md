@@ -1,0 +1,356 @@
+# PROMPT — Gerador de Diagrama de Topologia de Custos de Rede Azure (HTML Interativo)
+
+> **Instruções**: Cole este prompt no GitHub Copilot Agent Mode.  
+> Forneça o CSV de fatura Azure EA (`Detail_Enrollment_*.csv`).  
+> O agente irá: (1) extrair dados de rede do CSV, (2) gerar diagrama HTML interativo com topologia de custos.
+
+---
+
+## Objetivo
+
+Gere um **diagrama HTML interativo standalone** (arquivo único, sem backend) que analise e visualize a **topologia de custos de rede Azure** de um cliente a partir do CSV de fatura EA. O diagrama deve mostrar:
+
+- Arquitetura hub-spoke com tráfego bidirecional
+- Custos de Data Transfer Out (DTO) e Data Transfer In (DTI)
+- Agrupamento geográfico por região Azure
+- Inventário de recursos de rede por subscription
+- Interatividade: drag & drop, zoom, hover com detalhes
+
+---
+
+## 1. PIPELINE DE DADOS
+
+### 1.1 Extração de Fluxos de Rede (CSV → JSON `_net_flows.json`)
+
+Processar o CSV em streaming. Para cada linha com `MeterCategory` de rede (`Virtual Network`, `Bandwidth`, `ExpressRoute`, `Load Balancer`, `VPN Gateway`, `Azure Firewall`, `NAT Gateway`, `Azure DNS`, `CDN`, `Traffic Manager`, `Azure Front Door`, `Application Gateway`), acumular por `SubscriptionName`:
+
+| Acumulador | Como calcular |
+|---|---|
+| `peering_egress_gb/cost` | `MeterSubCategory` contém "Peering" (não "Global") + `MeterName` contém "Egress" |
+| `peering_ingress_gb/cost` | `MeterSubCategory` contém "Peering" (não "Global") + `MeterName` contém "Ingress" |
+| `global_peering_egress_gb/cost` | `MeterSubCategory` contém "Global Peering" + `MeterName` contém "Egress" |
+| `global_peering_ingress_gb/cost` | `MeterSubCategory` contém "Global Peering" + `MeterName` contém "Ingress" |
+| `internet_egress_gb/cost` | `MeterCategory` = "Bandwidth" + `MeterName` contém "Transfer Out" ou "Egress" |
+| `internet_ingress_gb/cost` | `MeterCategory` = "Bandwidth" + `MeterName` contém "Transfer In" ou "Ingress" |
+| `expressroute_out_gb/cost` | `MeterCategory` = "ExpressRoute" + `MeterName` contém "Transfer Out" ou "Egress" |
+| `expressroute_in_gb/cost` | `MeterCategory` = "ExpressRoute" + `MeterName` contém "Transfer In" ou "Ingress" |
+| `private_link_cost` | `MeterSubCategory` contém "Private Link" ou "Private Endpoint" |
+| `firewall_cost` | `MeterCategory` = "Azure Firewall" |
+| `nat_cost` | `MeterCategory` = "NAT Gateway" |
+| `lb_cost` | `MeterCategory` in ("Load Balancer", "Application Gateway") |
+| `total_net_cost` | Soma de todos os custos de rede |
+| `region` | `ResourceLocation` mais frequente |
+
+### 1.2 Extração de Inventário de Recursos (CSV → JSON `_net_resources.json`)
+
+Para cada subscription, contar **recursos únicos** (`ResourceName`) por tipo:
+
+| Tipo de recurso | Padrões para detectar (em `MeterCategory + MeterSubCategory + MeterName + ConsumedService`) |
+|---|---|
+| `expressroute_gateway` | "ErGw", "expressroute gateway" — **detectar antes de circuit** |
+| `expressroute_circuit` | "Circuit" (apenas!) — NÃO incluir "Metered Data" ou "Data Transfer" |
+| `expressroute_data` | "Metered Data", "Data Transfer" — custo de tráfego ER, separado do circuit |
+| `vpn_gateway` | "VpnGw", "VPN Gateway", "Basic Gateway" |
+| `private_endpoint` | "Private Endpoint" |
+| `private_link` | "Private Link" |
+| `firewall` | "Azure Firewall" |
+| `nat_gateway` | "NAT Gateway" |
+| `load_balancer` | "Load Balancer" |
+| `app_gateway` | "Application Gateway" |
+| `vnet_peering` | "Peering" |
+| `public_ip` | "Public IP", "IP Addresses" |
+| `dns` | "DNS" |
+
+**IMPORTANTE**: A ordem de detecção importa. Usar lista ordenada (não dict):
+1. `expressroute_gateway` (mais específico — "ErGw")
+2. `expressroute_circuit` (apenas "Circuit")
+3. `expressroute_data` (catch-all ER — "Metered Data", "Data Transfer")
+4. `vpn_gateway`
+5. ... demais tipos
+
+**NUNCA** misturar custo de data transfer com custo de circuit. O custo do circuit é a taxa fixa mensal; o data transfer é o tráfego cobrado por GB. São coisas diferentes e devem ser separadas no inventário.
+
+### 1.3 Detalhes de SKU de Gateways e Circuitos
+
+Para recursos do tipo `expressroute_gateway`, `expressroute_circuit` e `vpn_gateway`, capturar **adicionalmente** o detalhe individual de cada recurso:
+
+| Campo | Origem |
+|---|---|
+| `type` | Tipo do recurso (expressroute_circuit, expressroute_gateway, vpn_gateway) |
+| `resource` | `ResourceName` — nome do recurso (ex: `erc-ascenty-prd-brazilsouth-003`) |
+| `sku` | `MeterName` — contém o SKU/tier exato do recurso |
+| `cost` | Custo total do recurso no período |
+
+Salvar como lista `_gateway_details` dentro do JSON de cada subscription, ordenada por custo desc.
+
+**Exemplos de SKU esperados no campo `MeterName`:**
+
+| Tipo | Exemplos de SKU/MeterName |
+|---|---|
+| ER Circuit | `Standard Metered Data 2 Gbps Circuit`, `Premium Unlimited Data 10 Gbps Circuit`, `Standard Metered Data 1 Gbps Circuit`, `Local 1 Gbps Circuit` |
+| ER Gateway | `ErGw1AZ Gateway`, `ErGw2AZ Gateway`, `ErGw3AZ Gateway`, `High Performance Gateway`, `Ultra Performance Gateway`, `Standard Gateway` |
+| VPN Gateway | `VpnGw1`, `VpnGw1AZ`, `VpnGw2AZ`, `VpnGw3AZ`, `VpnGw4AZ`, `VpnGw5AZ`, `Basic Gateway`, `High Performance Gateway` |
+
+**Deduplicar** por `ResourceName` (somar custos se houver múltiplas linhas para o mesmo recurso).
+
+---
+
+## 2. ARQUITETURA DO DIAGRAMA HTML
+
+### 2.1 Tecnologias (inline, arquivo único)
+- **Google Fonts**: Inter + JetBrains Mono
+- **SVG**: Linhas de conexão (edges) com hit areas para hover
+- **HTML divs**: Cada nó é um elemento DOM independente, arrastável
+- **CSS Custom Properties**: Dark/light theme
+- **JavaScript vanilla**: Drag & drop, pan, zoom, tooltips, regiões arrastáveis
+
+### 2.2 Princípios de Layout
+
+1. **Subscriptions com ExpressRoute ou VPN Gateway** = nós centrais (hub). Se houver mais de um, distribuir horizontalmente no centro.
+2. **On-Premises** = posicionado na **base** do desenho (abaixo do hub)
+3. **Internet** = **um nó por região Azure** que tem tráfego de internet significativo, posicionado **acima** de cada região. Cada nó Internet mostra o custo de egress daquela região e, no tooltip, lista as subscriptions, tráfego agregado, e o total global de Internet. Preço de egress varia por região (Brasil ~2x mais caro que EUA) — essa separação é essencial para otimização.
+4. **Subscriptions normais** = organizadas por região Azure, em clusters geográficos
+5. **Regiões Azure** = caixas tracejadas agrupando as subscriptions da mesma região. Posicionadas de forma a refletir geografia:
+   - Regiões do Brasil (brazilsouth) = centro
+   - Regiões dos EUA (EastUS, EastUS2, CentralUS, WestUS) = acima/direita
+   - Regiões da Europa = acima/esquerda
+   - Regiões da Ásia = direita
+6. **Top N subscriptions** mostradas individualmente (14-16); restante agregadas em nó "Outros (X subs)" com botão de **expandir/contrair**
+7. **Collision avoidance**: Após posicionamento, executar loop de 60-80 iterações empurrando nós sobrepostos
+
+### 2.3 Setas e Direção — REGRA FUNDAMENTAL
+
+| Conceito Azure | Seta | Cor | Significado visual | Custo |
+|---|---|---|---|---|
+| **Data Transfer Out (DTO)** | ⬇ | 🔴 Vermelho | Dados saindo do Azure (download) | **Cobrado por GB** |
+| **Data Transfer In (DTI)** | ⬆ | 🟢 Verde | Dados entrando no Azure (upload) | **Grátis** (maioria dos cenários) |
+
+**IMPORTANTE**: Nunca inverter. DTO = saída = ⬇ (download). DTI = entrada = ⬆ (upload).
+
+---
+
+## 3. INTERATIVIDADE
+
+### 3.1 Drag & Drop de Nós
+- Cada caixa de subscription é arrastável individualmente
+- As linhas SVG de conexão acompanham o movimento em tempo real
+- Ao soltar, executar collision avoidance e redesenhar edges
+
+### 3.2 Drag & Drop de Regiões
+- Cada caixa de região tem um **anel invisível de ~6px** ao redor da borda (`.rdrag`) e o **label** como handles de drag
+- O interior da região é `pointer-events:none` para não bloquear hover nas linhas
+- Ao arrastar, **TODOS os nós dentro se movem juntos**
+- Manter posições relativas dos nós dentro da região
+
+### 3.3 Pan & Zoom
+- **Pan**: Clique + arraste no fundo do canvas
+- **Zoom**: Scroll do mouse (zoom toward cursor)
+- **Fit**: Botão "⊞ Fit" enquadra todos os nós na viewport
+- **Reset**: Botão "⟳ Reset" restaura layout original
+
+### 3.4 Controle de Fonte
+- Botões A−/A+/A⟲ para ajustar `fontScale` (0.5x a 2x)
+- Aplica-se tanto ao CSS (`documentElement.style.fontSize`) quanto aos labels SVG
+
+### 3.5 Hover/Tooltip nos Nós
+Ao passar o mouse sobre qualquer caixa de subscription, exibir **tooltip flutuante** (position:fixed, pointer-events:none) com:
+
+1. **Cabeçalho**: Nome, região, ambiente (PROD/DEV/UAT), flags (HUB, ExpressRoute, VPN)
+2. **Custo total de rede** (destaque)
+3. **📦 Inventário de Recursos** (grid 2 colunas):
+   - Tipo de recurso com ícone → Quantidade × Custo
+   - Ordenado por custo desc
+   - Exemplos: `🔌 ER Circuit 2x R$ 84.114`, `🔥 Firewall 1x R$ 4.939`
+4. **🔧 Detalhes de Gateways & Circuitos** (se houver ER/VPN):
+   - Listar cada gateway e circuito individualmente
+   - Para cada um mostrar: Tipo (ER Circuit / ER Gateway / VPN Gateway) + Custo
+   - Nome do recurso (ex: `erc-ascenty-prd-brazilsouth-003`)
+   - **SKU**: O tier/tipo exato do recurso (ex: `Standard Metered Data 2 Gbps Circuit`, `ErGw1AZ Gateway`, `VpnGw2AZ`)
+   - Ordenado por custo desc
+5. **Seções de tráfego** (se houver):
+   - 🔌 ExpressRoute: ⬇DTO (saída) com volume + custo | ⬆DTI (entrada) com volume + "GRÁTIS"
+   - 🔗 VNet Peering: ⬇DTO | ⬆DTI com custos
+   - ☁️ Internet: ⬇DTO | ⬆DTI
+   - Cada seção com **explicação contextual** (o que é, por que cobra, como otimizar)
+6. **🛡️ Serviços de rede**: Private Link, Firewall, NAT Gateway, LB/AppGw com custos
+
+### 3.6 Hover/Tooltip nas Linhas (Edges)
+Ao passar o mouse sobre uma linha de conexão, exibir tooltip com:
+- Tipo de conexão (ExpressRoute, VNet Peering, Internet, Global Peering)
+- ⬇ DTO: volume + custo + explicação do que significa
+- ⬆ DTI: volume + custo ou "GRÁTIS" + explicação
+- Custo total da conexão
+
+### 3.7 Posicionamento do Tooltip
+- Aparece a 18px à direita e 10px acima do cursor
+- Se ultrapassar a borda direita da janela, vai para a esquerda do cursor
+- Se ultrapassar a borda inferior, ajusta para cima
+- Nunca sai da viewport
+
+### 3.8 Tooltip durante Drag
+- Ao iniciar qualquer drag (nó, região ou pan), **esconder o tooltip imediatamente**
+- Durante o drag, **ignorar todos os eventos de hover** — `showTip` deve verificar se há drag ativo e retornar sem fazer nada
+- Tooltip volta a funcionar normalmente ao soltar o botão do mouse
+
+### 3.9 Expandir/Contrair nó "Outros"
+- O nó "Outros (X subs)" contém um **botão "📦 Expandir X subs"** dentro da caixa
+- No toolbar, há um **botão "📦 Expandir Outros"** / **"📦 Contrair Outros"**
+- **Expandir**: remove o nó "Outros" do diagrama e cria nós individuais para cada subscription agregada, com suas conexões e posições por região. O nó "Outros" desaparece.
+- **Contrair**: remove todos os nós expandidos e recria o nó "Outros" com custo e fluxos agregados. O nó "Outros" reaparece no diagrama.
+- Ciclo expandir/contrair deve funcionar múltiplas vezes sem bugs
+- **CUIDADO**: Ao contrair, limpar completamente o nó "Outros" de DATA, pos, byRegion e edges antes de recriá-lo
+
+### 3.10 Tooltip nos Nós de Internet
+- Cada nó Internet regional mostra no tooltip:
+  - Custo de egress daquela região (destaque)
+  - ⬇ DTO e ⬆ DTI com volumes e custos
+  - Explicação de que egress varia por região
+  - Lista de subscriptions que usam essa saída
+  - **Total global de Internet** (todas as regiões somadas)
+
+---
+
+## 4. DESIGN VISUAL
+
+### 4.1 Theme (Dark default)
+```css
+--bg:#0c0f17; --sf:#141a26; --cd:#1b2234; --bd:#2a3450;
+--tx:#e8ecf4; --mt:#8b95ab; --ft:#505d75;
+--bl:#4aa3e8; --pu:#a87de0; --tl:#2ec4a8;
+--or:#f0a030; --rd:#f05555; --gn:#45c45a;
+```
+
+### 4.2 Cores de Nós por Tipo
+| Tipo | Barra topo | Borda |
+|---|---|---|
+| Hub (ER/VPN) | `linear-gradient(90deg, --bl, --pu)` | `--bl` semitransparente |
+| PROD | `--gn` | `--gn` semitransparente |
+| DEV | `--or` | `--or` semitransparente |
+| UAT | `--pu` | `--pu` semitransparente |
+| Agregado/Outros | `--ft` | Border dashed |
+| Especial (On-Prem, Internet) | `--ft` | Border dashed |
+
+### 4.3 Edges
+- **Espessura** proporcional ao custo: `max(2, min(9, cost/5000))` pixels
+- **Opacidade**: 0.45 para edges > R$ 1.500, 0.18 para edges menores
+- **ExpressRoute**: `stroke-dasharray: 12,6`
+- **Labels**: Apenas em edges com custo > R$ 1.500, com fundo semi-transparente para legibilidade
+- **Hit area**: Linha invisível de 24px de largura para hover
+
+### 4.4 Region Boxes
+- Border dashed com cor da região, border-radius 18px
+- `pointer-events:none` no box (interior transparente a cliques)
+- Anel de drag (`.rdrag`) com `pointer-events:auto` ao redor da borda
+- Label com bandeira emoji + nome da região no topo, com `pointer-events:auto` para drag
+- Cor e label por região (configurável):
+  - brazilsouth: 🇧🇷 verde-teal
+  - EastUS/EastUS2: 🇺🇸 azul
+  - CentralUS/WestUS: 🇺🇸 roxo
+  - westeurope/northeurope: 🇪🇺 laranja
+  - etc.
+
+### 4.5 Flow Chips (badges nos nós)
+Cada nó mostra mini-badges com fluxos relevantes:
+- `⬇ER 100TB` (chip vermelho = DTO)
+- `⬆Peer 65TB` (chip verde = DTI)
+- `🔌ER×2` (chip azul = recurso)
+- `🔥FW` (chip azul = recurso)
+- `🔗PE×15` (chip azul = private endpoints)
+
+### 4.6 Z-Index — REGRA DE CAMADAS
+
+| Z-Index | Camada | Pointer Events | Função |
+|---|---|---|---|
+| 2 | Region boxes (borda visual) | none (interior) | Agrupamento visual |
+| 8 | SVG edges + hit areas | stroke (24px invisível) | Linhas de conexão + hover |
+| 10 | Node cards (divs) | auto | Caixas de subscription |
+| 12 | Region drag handles (borda + label) | auto | Arrastar regiões |
+| 20 | Edge labels (SVG separado) | none | DTO/DTI com fundo |
+
+**IMPORTANTE**: Linhas SEMPRE acima das region boxes para que hover funcione em qualquer lugar. Edge labels SEMPRE acima dos node cards para legibilidade.
+
+---
+
+## 5. GERAÇÃO — DOIS SCRIPTS
+
+### Script 1: `extract_network_data.py`
+```
+Entrada: CSV de fatura Azure EA
+Saída: _net_flows.json + _net_resources.json
+```
+- Streaming (sem carregar tudo em memória)
+- Encoding utf-8-sig, mapeamento por nome de coluna
+- Acumula fluxos e recursos por subscription
+- **Captura detalhes de SKU** de cada ER Gateway, ER Circuit e VPN Gateway (recurso + MeterName como SKU)
+- Salva `_gateway_details` com lista de recursos individuais, deduplicados por ResourceName
+
+### Script 2: `gen_network_diagram.py`
+```
+Entrada: _net_flows.json + _net_resources.json + finops_advisor_data.json (metadata)
+Saída: [CLIENTE]_Network_Architecture_[PERIODO].html
+```
+- Lê JSONs, calcula layout, gera HTML standalone
+- Todo CSS/JS inline
+- Dados hardcoded no JavaScript
+
+### Fluxo de uso
+```
+1. python extract_network_data.py    # processa CSV → JSONs
+2. python gen_network_diagram.py     # gera HTML interativo
+3. Abrir HTML no navegador
+```
+
+---
+
+## 6. ADAPTAÇÃO PARA DIFERENTES TOPOLOGIAS
+
+O gerador deve funcionar automaticamente para:
+
+| Topologia | Como detectar | Layout |
+|---|---|---|
+| **Hub-spoke com ExpressRoute** | Subscription com `expressroute_circuit` ou `expressroute_gateway` | Hub no centro, ER connection para On-Prem na base |
+| **Hub-spoke com VPN** | Subscription com `vpn_gateway` | Hub no centro, VPN connection para On-Prem |
+| **Multi-hub** | Múltiplas subscriptions com ER ou VPN | Distribuir hubs horizontalmente no centro |
+| **Cloud-only (sem on-prem)** | Nenhuma subscription com ER/VPN | Sem nó On-Prem; hub é a subscription com mais peering |
+| **Multi-region** | Subscriptions em regiões diferentes | Agrupar por região com layout geográfico |
+| **Single-region** | Todas na mesma região | Layout simples em grid |
+
+### Detecção automática de Hub
+1. Se há subscription com `expressroute_circuit` → é hub
+2. Se há subscription com `vpn_gateway` → é hub  
+3. Se nenhum ER/VPN, a subscription com mais `vnet_peering` ingress = hub
+4. Se múltiplos hubs, distribuir horizontalmente
+
+### Detecção de On-Premises
+- Se há custo de ExpressRoute ou VPN Gateway → mostrar nó On-Premises
+- Se não há → omitir nó On-Premises
+
+---
+
+## 7. CHECKLIST DE QUALIDADE
+
+- [ ] Todas as setas ⬇=DTO(cobra), ⬆=DTI(grátis) — **NUNCA inverter**
+- [ ] Cada caixa é um div HTML independente, não Canvas
+- [ ] Hover tooltip funciona em TODOS os nós E em TODAS as linhas
+- [ ] Tooltip mostra inventário de recursos (ER Gateway, ER Circuit, VPN, Private Endpoint, etc.)
+- [ ] Tooltip mostra **detalhes de SKU** de cada ER Gateway, ER Circuit e VPN Gateway (nome do recurso + SKU/tier + custo individual)
+- [ ] Regiões são arrastáveis (movem todos os nós dentro)
+- [ ] Nós individuais são arrastáveis (linhas acompanham)
+- [ ] Collision avoidance evita sobreposição
+- [ ] On-Premises na BASE, Internet **por região no TOPO**, Hub(s) no CENTRO
+- [ ] Subscriptions agrupadas por região com caixas tracejadas
+- [ ] Dark theme padrão com toggle para light
+- [ ] Controles de fonte (A−/A+/A⟲)
+- [ ] Fit e Reset layout
+- [ ] Valores monetários em padrão brasileiro (R$ X.XXX,XX)
+- [ ] Labels de edges só nos custos > R$ 1.500
+- [ ] Explicações contextuais em cada seção do tooltip
+- [ ] Funciona com qualquer número de subscriptions (1 a 100+)
+- [ ] Funciona com ou sem ExpressRoute/VPN
+- [ ] Internet separada por região (um nó por região com tráfego)
+- [ ] Tooltip de Internet mostra tráfego agregado da região + total global
+- [ ] Botão expandir/contrair "Outros" funciona em ciclos múltiplos
+- [ ] Tooltip esconde durante drag (nó, região ou pan)
+- [ ] Linhas (edges) sempre acima das region boxes (z-index 8 > 2)
+- [ ] Region boxes transparentes a cliques no interior (pointer-events:none)
+- [ ] Drag de região via borda/label — não bloqueia hover nas linhas
