@@ -106,19 +106,40 @@ Salvar como lista `_gateway_details` dentro do JSON de cada subscription, ordena
 
 ### 2.2 Princípios de Layout
 
-1. **Subscriptions com ExpressRoute ou VPN Gateway** = nós centrais (hub). Se houver mais de um, distribuir horizontalmente no centro.
-2. **On-Premises** = posicionado na **base** do desenho (abaixo do hub)
+1. **Hubs DENTRO da sua região** — subscriptions com ExpressRoute ou VPN Gateway são posicionadas no **topo da region box** da sua respectiva região Azure. Se houver mais de um hub na mesma região, distribuir horizontalmente no topo. **NÃO** posicionar hubs numa faixa separada fora das region boxes.
+2. **On-Premises** = posicionado na **base** do desenho (abaixo das regiões)
 3. **Internet** = **um nó por região Azure** que tem tráfego de internet significativo, posicionado **acima** de cada região. Cada nó Internet mostra o custo de egress daquela região e, no tooltip, lista as subscriptions, tráfego agregado, e o total global de Internet. Preço de egress varia por região (Brasil ~2x mais caro que EUA) — essa separação é essencial para otimização.
-4. **Subscriptions normais** = organizadas por região Azure, em clusters geográficos
-5. **Regiões Azure** = caixas tracejadas agrupando as subscriptions da mesma região. Posicionadas de forma a refletir geografia:
+4. **Subscriptions normais (spokes)** = organizadas em grid abaixo do hub, dentro da mesma region box
+5. **Regiões Azure** = caixas tracejadas agrupando **TODAS** as subscriptions da mesma região (hubs + spokes). Posicionadas de forma a refletir geografia:
    - Regiões do Brasil (brazilsouth) = centro
    - Regiões dos EUA (EastUS, EastUS2, CentralUS, WestUS) = acima/direita
    - Regiões da Europa = acima/esquerda
    - Regiões da Ásia = direita
 6. **Top N subscriptions** mostradas individualmente (14-16); restante agregadas em nó "Outros (X subs)" com botão de **expandir/contrair**
-7. **Collision avoidance**: Após posicionamento, executar loop de 60-80 iterações empurrando nós sobrepostos
+7. **Collision avoidance em 3 fases** (ver seção 2.4)
 
-### 2.3 Setas e Direção — REGRA FUNDAMENTAL
+### 2.4 Collision Avoidance — 3 Fases
+
+**NUNCA** usar um loop global que empurra todos os nós indiscriminadamente. Isso causa drift de nós entre regiões. Usar **3 fases sequenciais**:
+
+**Fase 1 — Intra-região**: Para cada região, resolver sobreposições apenas entre os nós daquela região. Nós de regiões diferentes **não interagem** nesta fase. Isso mantém cada cluster coeso.
+
+**Fase 2 — Inter-região (box separation)**: Tratar cada region box como um retângulo e verificar sobreposição entre pares de region boxes. Se duas boxes se sobrepõem, empurrar **todas as suas nodes juntas** na direção de menor sobreposição (horizontal ou vertical). Recalcular os bounds da region box após cada empurrão. Iterar até convergir (~50 iterações).
+
+**Fase 3 — Nós especiais**: Resolver sobreposições entre nós especiais (`__onprem__`, `__inet_*__`) e todos os nós regulares. Isso posiciona On-Premises e Internet sem conflito com as regiões.
+
+### 2.5 Recálculo de Region Boxes Pós-Render
+
+As region boxes devem ser **recalculadas após o rendering dos nós no DOM**, porque a altura real de cada nó depende do conteúdo (chips, nome, etc.) e pode ser maior que a estimativa usada no layout (ex: 120px estimado vs 160px real). O fluxo correto no `render()` é:
+
+1. Desenhar region boxes com dimensões estimadas
+2. Desenhar todos os nós (atualiza `pos[id].h = el.offsetHeight`)
+3. Recalcular region boxes com as alturas reais (`recalcRB()`)
+4. Atualizar o DOM das region boxes com as novas dimensões
+
+A função `recalcRB()` percorre `regionBoxes[rk].nodes`, lê `pos[id]` com `w` e `h` atualizados, e recalcula `x, y, w, h` do box com padding de 20px lateral e 28px topo.
+
+### 2.6 Setas e Direção — REGRA FUNDAMENTAL
 
 | Conceito Azure | Seta | Cor | Significado visual | Custo |
 |---|---|---|---|---|
@@ -273,10 +294,24 @@ Cada nó mostra mini-badges com fluxos relevantes:
 
 ## 5. GERAÇÃO — DOIS SCRIPTS
 
-### Script 1: `extract_network_data.py`
+### 5.0 Convenção de Nomes — Prefixo do Cliente
+
+**TODOS** os arquivos gerados durante o processo devem incluir o **nome do cliente** como prefixo no nome do arquivo. Isso evita conflito quando múltiplos processos rodam em paralelo para clientes diferentes no mesmo diretório.
+
+| Tipo de arquivo | Padrão de nome | Exemplo |
+|---|---|---|
+| Script de extração | `[CLIENTE]_extract_network_data.py` | `Renner_extract_network_data.py` |
+| Script de geração | `[CLIENTE]_gen_network_diagram.py` | `Renner_gen_network_diagram.py` |
+| JSON de fluxos | `[CLIENTE]_net_flows.json` | `Renner_net_flows.json` |
+| JSON de recursos | `[CLIENTE]_net_resources.json` | `Renner_net_resources.json` |
+| HTML final | `[CLIENTE]_Network_Architecture_[PERIODO].html` | `Renner_Network_Architecture_202604.html` |
+
+O nome do cliente é derivado automaticamente do nome do CSV de entrada (ex: `Renner_Detail_Enrollment_86970151_202604_en.csv` → `Renner`).
+
+### Script 1: `[CLIENTE]_extract_network_data.py`
 ```
 Entrada: CSV de fatura Azure EA
-Saída: _net_flows.json + _net_resources.json
+Saída: [CLIENTE]_net_flows.json + [CLIENTE]_net_resources.json
 ```
 - Streaming (sem carregar tudo em memória)
 - Encoding utf-8-sig, mapeamento por nome de coluna
@@ -284,9 +319,9 @@ Saída: _net_flows.json + _net_resources.json
 - **Captura detalhes de SKU** de cada ER Gateway, ER Circuit e VPN Gateway (recurso + MeterName como SKU)
 - Salva `_gateway_details` com lista de recursos individuais, deduplicados por ResourceName
 
-### Script 2: `gen_network_diagram.py`
+### Script 2: `[CLIENTE]_gen_network_diagram.py`
 ```
-Entrada: _net_flows.json + _net_resources.json + finops_advisor_data.json (metadata)
+Entrada: [CLIENTE]_net_flows.json + [CLIENTE]_net_resources.json
 Saída: [CLIENTE]_Network_Architecture_[PERIODO].html
 ```
 - Lê JSONs, calcula layout, gera HTML standalone
@@ -295,8 +330,8 @@ Saída: [CLIENTE]_Network_Architecture_[PERIODO].html
 
 ### Fluxo de uso
 ```
-1. python extract_network_data.py    # processa CSV → JSONs
-2. python gen_network_diagram.py     # gera HTML interativo
+1. python [CLIENTE]_extract_network_data.py [CSV]   # processa CSV → JSONs
+2. python [CLIENTE]_gen_network_diagram.py            # gera HTML interativo
 3. Abrir HTML no navegador
 ```
 
@@ -308,9 +343,9 @@ O gerador deve funcionar automaticamente para:
 
 | Topologia | Como detectar | Layout |
 |---|---|---|
-| **Hub-spoke com ExpressRoute** | Subscription com `expressroute_circuit` ou `expressroute_gateway` | Hub no centro, ER connection para On-Prem na base |
-| **Hub-spoke com VPN** | Subscription com `vpn_gateway` | Hub no centro, VPN connection para On-Prem |
-| **Multi-hub** | Múltiplas subscriptions com ER ou VPN | Distribuir hubs horizontalmente no centro |
+| **Hub-spoke com ExpressRoute** | Subscription com `expressroute_circuit` ou `expressroute_gateway` | Hub no topo da region box, ER connection para On-Prem na base |
+| **Hub-spoke com VPN** | Subscription com `vpn_gateway` | Hub no topo da region box, VPN connection para On-Prem |
+| **Multi-hub** | Múltiplas subscriptions com ER ou VPN | Cada hub no topo da sua region box; se na mesma região, distribuir horizontalmente |
 | **Cloud-only (sem on-prem)** | Nenhuma subscription com ER/VPN | Sem nó On-Prem; hub é a subscription com mais peering |
 | **Multi-region** | Subscriptions em regiões diferentes | Agrupar por região com layout geográfico |
 | **Single-region** | Todas na mesma região | Layout simples em grid |
@@ -319,7 +354,8 @@ O gerador deve funcionar automaticamente para:
 1. Se há subscription com `expressroute_circuit` → é hub
 2. Se há subscription com `vpn_gateway` → é hub  
 3. Se nenhum ER/VPN, a subscription com mais `vnet_peering` ingress = hub
-4. Se múltiplos hubs, distribuir horizontalmente
+4. Se múltiplos hubs **na mesma região**, distribuir horizontalmente no topo da region box
+5. Hubs em **regiões diferentes** ficam cada um no topo da sua respectiva region box
 
 ### Detecção de On-Premises
 - Se há custo de ExpressRoute ou VPN Gateway → mostrar nó On-Premises
@@ -337,8 +373,10 @@ O gerador deve funcionar automaticamente para:
 - [ ] Regiões são arrastáveis (movem todos os nós dentro)
 - [ ] Nós individuais são arrastáveis (linhas acompanham)
 - [ ] Collision avoidance evita sobreposição
-- [ ] On-Premises na BASE, Internet **por região no TOPO**, Hub(s) no CENTRO
-- [ ] Subscriptions agrupadas por região com caixas tracejadas
+- [ ] On-Premises na BASE, Internet **por região no TOPO**, Hub(s) **no topo da sua region box**
+- [ ] Subscriptions agrupadas por região com caixas tracejadas (hubs + spokes dentro da mesma box)
+- [ ] Collision avoidance em 3 fases: intra-região → inter-região → especiais (NUNCA global indiscriminado)
+- [ ] Region boxes recalculadas pós-render com alturas reais do DOM
 - [ ] Dark theme padrão com toggle para light
 - [ ] Controles de fonte (A−/A+/A⟲)
 - [ ] Fit e Reset layout
@@ -354,3 +392,4 @@ O gerador deve funcionar automaticamente para:
 - [ ] Linhas (edges) sempre acima das region boxes (z-index 8 > 2)
 - [ ] Region boxes transparentes a cliques no interior (pointer-events:none)
 - [ ] Drag de região via borda/label — não bloqueia hover nas linhas
+- [ ] Todos os scripts e arquivos de apoio usam prefixo `[CLIENTE]_` no nome (ex: `Renner_net_flows.json`)
