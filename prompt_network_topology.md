@@ -23,7 +23,7 @@ Gere um **diagrama HTML interativo standalone** (arquivo único, sem backend) qu
 
 ### 1.1 Extração de Fluxos de Rede (CSV → JSON `_net_flows.json`)
 
-Processar o CSV em streaming. Para cada linha com `MeterCategory` de rede (`Virtual Network`, `Bandwidth`, `ExpressRoute`, `Load Balancer`, `VPN Gateway`, `Azure Firewall`, `NAT Gateway`, `Azure DNS`, `CDN`, `Traffic Manager`, `Azure Front Door`, `Application Gateway`), acumular por `SubscriptionName`:
+Processar o CSV em streaming. Para cada linha com `MeterCategory` de rede (`Virtual Network`, `Bandwidth`, `ExpressRoute`, `Load Balancer`, `VPN Gateway`, `Azure Firewall`, `NAT Gateway`, `Azure DNS`, `CDN`, `Traffic Manager`, `Azure Front Door`, `Azure Front Door Service`, `Application Gateway`, `Virtual WAN`, `Azure Firewall Manager`, `Azure Bastion`, `Network Watcher`), acumular por `SubscriptionName`:
 
 | Acumulador | Como calcular |
 |---|---|
@@ -31,19 +31,40 @@ Processar o CSV em streaming. Para cada linha com `MeterCategory` de rede (`Virt
 | `peering_ingress_gb/cost` | `MeterSubCategory` contém "Peering" (não "Global") + `MeterName` contém "Ingress" |
 | `global_peering_egress_gb/cost` | `MeterSubCategory` contém "Global Peering" + `MeterName` contém "Egress" |
 | `global_peering_ingress_gb/cost` | `MeterSubCategory` contém "Global Peering" + `MeterName` contém "Ingress" |
-| `internet_egress_gb/cost` | `MeterCategory` = "Bandwidth" + `MeterName` contém "Transfer Out" ou "Egress" |
+| `internet_egress_gb/cost` | `MeterCategory` = "Bandwidth" + `MeterSubCategory` NÃO "Inter-Region" + `MeterName` contém "Transfer Out" ou "Egress" |
 | `internet_ingress_gb/cost` | `MeterCategory` = "Bandwidth" + `MeterName` contém "Transfer In" ou "Ingress" |
+| `interregion_egress_gb/cost` | `MeterCategory` = "Bandwidth" + (`MeterSubCategory` = "Inter-Region" OU `MeterName` contém "Inter Continent" ou "Intra Continent"). Tráfego **cross-region interno do Azure**, NÃO internet. |
 | `expressroute_out_gb/cost` | `MeterCategory` = "ExpressRoute" + `MeterName` contém "Metered Data" (sem "Circuit") ou "Transfer Out" |
 | `expressroute_in_gb/cost` | `MeterCategory` = "ExpressRoute" + `MeterName` contém "Data Transfer In" |
 | `expressroute_circuit_cost` | `MeterCategory` = "ExpressRoute" + `MeterName` contém "Circuit" (custo fixo mensal do circuito) |
-| `expressroute_gateway_cost` | `MeterCategory` = "ExpressRoute" + (`MeterSubCategory` contém "Gateway" ou `MeterName` contém "ErGw") |
-| `vpn_cost` | `MeterCategory` = "VPN Gateway" (custo fixo mensal do gateway VPN) |
-| `private_link_cost` | `MeterSubCategory` contém "Private Link" ou "Private Endpoint" |
+| `expressroute_gateway_cost` | `MeterCategory` = "ExpressRoute" + (`MeterSubCategory` contém "Gateway" ou `MeterName` contém "ErGw"). Também: `MeterCategory` = "Virtual WAN" + `MeterName` contém "ExpressRoute Scale Unit" ou "ExpressRoute Connection Unit" |
+| `vpn_cost` | `MeterCategory` = "VPN Gateway". Também: `MeterCategory` = "Virtual WAN" + `MeterName` contém "VPN S2S Scale Unit" |
+| `vwan_hub_cost` | `MeterCategory` = "Virtual WAN" + `MeterName` contém "Hub Unit" ou "Hub Data Processed" (custo fixo do hub vWAN) |
+| `private_endpoint_cost` | `MeterSubCategory` contém "Private Endpoint" + `MeterName` contém "Private Endpoint" + UoM hora/mês (custo fixo hourly dos endpoints) |
+| `private_link_ingress_gb/cost` | `MeterSubCategory` contém "Private Link" + `MeterName` contém "Ingress" (dados processados por GB — flow, não infra) |
+| `private_link_egress_gb/cost` | `MeterSubCategory` contém "Private Link" + `MeterName` contém "Egress" (dados processados por GB — flow, não infra) |
 | `firewall_cost` | `MeterCategory` = "Azure Firewall" |
+| `firewall_manager_cost` | `MeterCategory` = "Azure Firewall Manager" |
 | `nat_cost` | `MeterCategory` = "NAT Gateway" |
-| `lb_cost` | `MeterCategory` in ("Load Balancer", "Application Gateway") |
+| `lb_cost` | `MeterCategory` = "Load Balancer" (apenas) |
+| `appgw_cost` | `MeterCategory` = "Application Gateway" (separado de LB — é edge security L7 WAF, não L4) |
+| `frontdoor_egress_gb/cost` | `MeterCategory` in ("Azure Front Door", "Azure Front Door Service") + `MeterName` contém "Transfer Out" ou "Egress" |
+| `frontdoor_ingress_gb/cost` | `MeterCategory` in ("Azure Front Door", "Azure Front Door Service") + `MeterName` contém "Transfer In" ou "Ingress" |
+| `frontdoor_infra_cost` | `MeterCategory` in ("Azure Front Door", "Azure Front Door Service") + demais meters (Base Fees, Requests, etc.) |
+| `dns_cost` | `MeterCategory` = "Azure DNS" |
+| `bastion_cost` | `MeterCategory` = "Azure Bastion" |
 | `total_net_cost` | Soma de todos os custos de rede |
 | `region` | `ResourceLocation` mais frequente |
+
+**IMPORTANTE — Separação Bandwidth vs Inter-Region**: O campo `internet_egress` deve conter APENAS tráfego de saída para a internet. Tráfego cross-region interno do Azure (`MeterSubCategory` = "Inter-Region", ou nomes como "Inter Continent Data Transfer Out", "Intra Continent Data Transfer Out") deve ir para `interregion_egress`, **NÃO** para `internet_egress`. Misturar os dois inflaciona drasticamente o nó Internet e oculta o custo real de tráfego cross-region.
+
+**IMPORTANTE — Private Link split**: Private Link tem 3 naturezas distintas:
+- **PE hourly** (`private_endpoint_cost`): custo fixo por hora de cada Private Endpoint — é infraestrutura
+- **Data Ingress** (`private_link_ingress_gb/cost`): dados processados entrando via PE — é data transfer, mostrar como flow com volume
+- **Data Egress** (`private_link_egress_gb/cost`): dados processados saindo via PE — é data transfer
+Nunca agregar os 3 em um único `private_link_cost`.
+
+**IMPORTANTE — Application Gateway ≠ Load Balancer**: Application Gateway (WAF v2, Standard v2) é um serviço de borda L7 (WAF, SSL offload, routing). Load Balancer é L4 interno. Custos e funções são completamente diferentes. Usar acumuladores separados.
 
 **IMPORTANTE — Custos de infraestrutura nos flows**: Os campos `expressroute_circuit_cost`, `expressroute_gateway_cost` e `vpn_cost` são **essenciais** para os edges que conectam hubs ao On-Premises. Sem eles, os tooltips e labels dessas linhas ficam zerados. Estes custos devem ser acumulados no **flows JSON** (não apenas no inventário de recursos), pois são usados diretamente pelos edges no diagrama.
 
@@ -58,18 +79,43 @@ A classificação dentro de `MeterCategory = "ExpressRoute"` segue esta ordem:
 
 Para `MeterCategory = "VPN Gateway"` → acumular direto em `vpn_cost`.
 
+### 1.1.1 Classificação de Virtual WAN
+
+A `MeterCategory = "Virtual WAN"` contém recursos que são equivalentes funcionais dos gateways tradicionais. Classificar:
+
+1. Se `MeterName` contém "ExpressRoute Scale Unit" ou "ExpressRoute Connection Unit" → `expressroute_gateway_cost` (funcionalmente equivalente a ER Gateway)
+2. Se `MeterName` contém "VPN S2S Scale Unit" → `vpn_cost` (funcionalmente equivalente a VPN Gateway)
+3. Demais (`Standard Hub Unit`, `Standard Hub Data Processed`, etc.) → `vwan_hub_cost` (custo fixo do hub vWAN)
+
+Esta classificação é **essencial** para que subscriptions com Virtual WAN sejam corretamente detectadas como HUB e gerem edges para On-Premises.
+
+### 1.1.2 Classificação de Azure Front Door Service
+
+**ATENÇÃO**: A fatura EA pode usar `MeterCategory` = "Azure Front Door Service" (com "Service" no final), diferente do que a documentação Azure chama de "Azure Front Door". O NET_CATS deve incluir **ambas** as variantes. Classificar:
+
+1. Se `MeterName` contém "Transfer Out" ou "Egress" → `frontdoor_egress_gb/cost`
+2. Se `MeterName` contém "Transfer In" ou "Ingress" → `frontdoor_ingress_gb/cost`
+3. Demais (Base Fees, Requests, etc.) → `frontdoor_infra_cost`
+
+### 1.1.3 Classificação de Azure Firewall Manager
+
+`MeterCategory = "Azure Firewall Manager"` é separado de `Azure Firewall`. Acumular em `firewall_manager_cost`. No diagrama, mostrar como item separado no tooltip sob "Serviços de Rede".
+
 ### 1.2 Extração de Inventário de Recursos (CSV → JSON `_net_resources.json`)
 
 Para cada subscription, contar **recursos únicos** (`ResourceName`) por tipo:
 
 | Tipo de recurso | Padrões para detectar (em `MeterCategory + MeterSubCategory + MeterName + ConsumedService`) |
 |---|---|
+| `vwan_hub` | "Standard Hub Unit", "Standard Hub Data" — hub vWAN |
+| `vwan_er_gateway` | "ExpressRoute Scale Unit", "ExpressRoute Connection Unit" — ER no vWAN |
+| `vwan_vpn_gateway` | "VPN S2S Scale Unit" — VPN no vWAN |
 | `expressroute_gateway` | "ErGw", "expressroute gateway" — **detectar antes de circuit** |
 | `expressroute_circuit` | "Circuit" (apenas!) — NÃO incluir "Metered Data" ou "Data Transfer" |
-| `expressroute_data` | "Metered Data", "Data Transfer" — custo de tráfego ER, separado do circuit |
 | `vpn_gateway` | "VpnGw", "VPN Gateway", "Basic Gateway" |
 | `private_endpoint` | "Private Endpoint" |
 | `private_link` | "Private Link" |
+| `firewall_manager` | "Firewall Manager", "Policy analytics" |
 | `firewall` | "Azure Firewall" |
 | `nat_gateway` | "NAT Gateway" |
 | `load_balancer` | "Load Balancer" |
@@ -77,23 +123,28 @@ Para cada subscription, contar **recursos únicos** (`ResourceName`) por tipo:
 | `vnet_peering` | "Peering" |
 | `public_ip` | "Public IP", "IP Addresses" |
 | `dns` | "DNS" |
+| `front_door` | "Front Door" |
 
 **IMPORTANTE**: A ordem de detecção importa. Usar lista ordenada (não dict):
-1. `expressroute_gateway` (mais específico — "ErGw")
-2. `expressroute_circuit` (apenas "Circuit")
-3. `expressroute_data` (catch-all ER — "Metered Data", "Data Transfer")
-4. `vpn_gateway`
-5. ... demais tipos
+1. `vwan_hub` (mais específico — "Standard Hub")
+2. `vwan_er_gateway` ("ExpressRoute Scale Unit")
+3. `vwan_vpn_gateway` ("VPN S2S Scale Unit")
+4. `expressroute_gateway` (mais específico — "ErGw")
+5. `expressroute_circuit` (apenas "Circuit")
+6. `vpn_gateway`
+7. ... demais tipos
+
+**NÃO incluir `expressroute_data`** na lista de tipos de recurso. "Metered Data" e "Data Transfer" são registros de cobrança de tráfego, não componentes de rede gerenciáveis. O custo já está capturado nos acumuladores de flow (`expressroute_out_gb/cost`, `internet_egress_gb/cost`, etc.). Incluir como recurso gera um filtro inútil (quase todas as subs têm) e confunde o usuário.
 
 **NUNCA** misturar custo de data transfer com custo de circuit. O custo do circuit é a taxa fixa mensal; o data transfer é o tráfego cobrado por GB. São coisas diferentes e devem ser separadas no inventário.
 
 ### 1.3 Detalhes de SKU de Gateways e Circuitos
 
-Para recursos do tipo `expressroute_gateway`, `expressroute_circuit` e `vpn_gateway`, capturar **adicionalmente** o detalhe individual de cada recurso:
+Para recursos do tipo `expressroute_gateway`, `expressroute_circuit`, `vpn_gateway`, `vwan_hub`, `vwan_er_gateway` e `vwan_vpn_gateway`, capturar **adicionalmente** o detalhe individual de cada recurso:
 
 | Campo | Origem |
 |---|---|
-| `type` | Tipo do recurso (expressroute_circuit, expressroute_gateway, vpn_gateway) |
+| `type` | Tipo do recurso (expressroute_circuit, expressroute_gateway, vpn_gateway, vwan_hub, vwan_er_gateway, vwan_vpn_gateway) |
 | `resource` | `ResourceName` — nome do recurso (ex: `erc-ascenty-prd-brazilsouth-003`) |
 | `sku` | `MeterName` — contém o SKU/tier exato do recurso |
 | `cost` | Custo total do recurso no período |
@@ -107,6 +158,9 @@ Salvar como lista `_gateway_details` dentro do JSON de cada subscription, ordena
 | ER Circuit | `Standard Metered Data 2 Gbps Circuit`, `Premium Unlimited Data 10 Gbps Circuit`, `Standard Metered Data 1 Gbps Circuit`, `Local 1 Gbps Circuit` |
 | ER Gateway | `ErGw1AZ Gateway`, `ErGw2AZ Gateway`, `ErGw3AZ Gateway`, `High Performance Gateway`, `Ultra Performance Gateway`, `Standard Gateway` |
 | VPN Gateway | `VpnGw1`, `VpnGw1AZ`, `VpnGw2AZ`, `VpnGw3AZ`, `VpnGw4AZ`, `VpnGw5AZ`, `Basic Gateway`, `High Performance Gateway` |
+| vWAN ER | `ExpressRoute Scale Unit`, `ExpressRoute Connection Unit` |
+| vWAN VPN | `VPN S2S Scale Unit` |
+| vWAN Hub | `Standard Hub Unit`, `Standard Hub Data Processed` |
 
 **Deduplicar** por `ResourceName` (somar custos se houver múltiplas linhas para o mesmo recurso).
 
@@ -146,36 +200,22 @@ Isso garante que **nenhum custo de rede é silenciosamente descartado**, mesmo p
 ```html
 <div id="toolbar">...</div>
 <div id="filterBar">
-  <span class="flabel">🔍 Filtro por componente:</span>
-  <div id="fchips"></div>
-  <div class="fsep"></div>
+  <button id="btnFilterOpen" onclick="toggleFilterDropdown()">🔍 Filtros</button>
   <span id="filterMode" onclick="toggleFilterMode()">OR</span>
   <span id="filterCount"></span>
-  <button id="filterClear" onclick="clearFilters()">✕ Limpar</button>
+  <button id="filterClear" onclick="clearFilters()">✕</button>
+  <div class="fsep"></div>
+  <div id="activeChips"></div>
+</div>
+<div id="filterOverlay" onclick="closeFilterDropdown()"></div>
+<div id="filterDropdown">
+  <div class="fd-title">Filtrar por componente de rede</div>
+  <div class="fd-grid" id="fchips"></div>
 </div>
 <button id="btnSubPanel" onclick="toggleSubPanel()">📋 Subscriptions</button>
-<div id="subPanel">
-  <div class="sp-header">
-    <span class="sp-title">Subscriptions</span>
-    <button onclick="subSelectAll()">All</button>
-    <button onclick="subSelectNone()">None</button>
-    <button onclick="subSelectProd()">PROD</button>
-    <button onclick="subSelectDev()">DEV</button>
-  </div>
-  <input class="sp-search" id="subSearch" placeholder="Buscar..." oninput="renderSubList()">
-  <div id="subList"></div>
-  <div class="sp-footer" id="subFooter"></div>
-</div>
-<div id="canvas">
-  <div id="world">
-    <svg id="svgEdges" style="position:absolute;top:0;left:0;width:1px;height:1px;pointer-events:none;z-index:8;overflow:visible"></svg>
-    <svg id="svgLabels" style="position:absolute;top:0;left:0;width:1px;height:1px;pointer-events:none;z-index:20;overflow:visible"></svg>
-    <!-- region boxes e node divs são adicionados aqui via JS -->
-  </div>
-</div>
 ```
 
-O `#canvas` deve ter `top:80px` (toolbar 44px + filterBar 36px) para não ficar atrás das barras fixas.
+A ordem dos elementos na barra é: **botão Filtros → OR/AND → X/Y subs → ✕ → separador → chips ativos**. Os controles ficam agrupados à esquerda (relacionados ao filtro), chips ativos à direita (feedback visual). O `#canvas` tem `top` ajustado dinamicamente via JS (`adjustLayout()`).
 
 **IMPORTANTE**: O `transform` (translate + scale) é aplicado APENAS no `#world`. Como os SVGs estão dentro, eles herdam o transform automaticamente. **NÃO** aplicar transform separado nos SVGs — isso causa desalinhamento entre edges e nós ao fazer zoom ou pan.
 
@@ -285,9 +325,11 @@ Ao passar o mouse sobre qualquer caixa de subscription, exibir **tooltip flutuan
 5. **Seções de tráfego** (se houver):
    - 🔌 ExpressRoute: ⬇DTO (saída) com volume + custo | ⬆DTI (entrada) com volume + "GRÁTIS"
    - 🔗 VNet Peering: ⬇DTO | ⬆DTI com custos
-   - ☁️ Internet: ⬇DTO | ⬆DTI
+   - ☁️ Internet + Front Door: ⬇Bandwidth Egress (volume+custo) | ⬇Front Door DTO (volume+custo) | ⬆DTI
+   - ↔ Inter-Region: tráfego cross-region Azure (volume+custo) — NÃO é internet
+   - 🔗 Private Link — Dados: ⬆Ingress via PE (volume+custo) | ⬇Egress via PE (volume+custo) — flow de dados, não infra
    - Cada seção com **explicação contextual** (o que é, por que cobra, como otimizar)
-6. **🛡️ Serviços de rede**: Private Link, Firewall, NAT Gateway, LB/AppGw com custos
+6. **🛡️ Serviços de rede (infra)**: PE hourly, Firewall, Firewall Manager, vWAN Hub, NAT GW, App Gateway, Load Balancer, Front Door infra, DNS com custos separados
 
 ### 3.6 Hover/Tooltip nas Linhas (Edges)
 Ao passar o mouse sobre uma linha de conexão, exibir tooltip com:
@@ -304,45 +346,61 @@ Ao passar o mouse sobre uma linha de conexão, exibir tooltip com:
 
 O `totalCost` no headline é a soma de todos (visão rápida), mas abaixo **cada componente aparece individualmente**.
 
-#### 3.6.1 Edge para On-Premises — APENAS ExpressRoute
+#### 3.6.1 Edges para On-Premises — ExpressRoute E VPN
 
-A linha para On-Premises existe **somente** para hubs com ExpressRoute. VPN Gateway **NÃO** gera linha para On-Premises — o tráfego VPN transita pela internet e é cobrado como Bandwidth genérica na fatura EA.
+A linha para On-Premises existe para hubs com **ExpressRoute** e/ou **VPN Gateway** (incluindo Virtual WAN).
 
-O edge tipo `onprem` carrega:
+**Edge tipo `onprem_er`** (ExpressRoute):
 - DTO/DTI do ExpressRoute metered (volume + custo)
 - Custo fixo dos Circuitos ER (se > 0)
+- **Estilo visual:** azul dashed (`stroke-dasharray: 12,6`)
 
-O tooltip mostra:
-- Seção 🔌 ExpressRoute com DTO, DTI, custo dos circuitos e explicação
+**Edge tipo `onprem_vpn`** (VPN):
+- Custo fixo do VPN Gateway ou vWAN VPN S2S Scale Unit
+- Custo fixo do vWAN Hub (se aplicável)
+- **NÃO tem DTO/DTI** — tráfego VPN transita pela internet pública e é cobrado como Bandwidth genérica ("Standard Data Transfer Out") na fatura EA, sem meter separado
+- **Estilo visual:** cinza dotted (`stroke-dasharray: 6,4`, cor `#8b95ab`) — distinto do ER
 
-**Estilo visual:** azul dashed (`stroke-dasharray: 12,6`)
+**Se o hub tem ER + VPN**, ambos edges aparecem (duas linhas para On-Premises, estilo visual diferente).
 
-**Nó On-Premises:** mostrado apenas se existir pelo menos 1 hub com ExpressRoute (`erHubSubs.length > 0`). Se o cliente só tem VPN (sem ER), o nó On-Premises **não aparece**.
+O tooltip do edge VPN explica: "Túnel VPN IPSec — tráfego transita pela internet pública. O custo de dados VPN aparece como Bandwidth genérica na fatura EA, sem meter separado. O valor mostrado aqui é apenas a infraestrutura fixa do gateway."
+
+**Nó On-Premises:** mostrado se existir pelo menos 1 hub com ExpressRoute OU VPN.
 
 **Card do nó On-Premises:**
-- **Headline**: custo total (DTO + DTI + Circuit + Gateway) como visão rápida
-- **Chips separados** para cada componente de custo:
-  - `⬇DTO R$ X.XXX` (chip vermelho) — custo de dados metered
-  - `🔌Circuit R$ X.XXX` (chip azul) — custo fixo dos circuitos
-  - `🔌Gateway R$ X.XXX` (chip azul) — custo fixo dos gateways
-- **NUNCA** somar DTO + Circuit em um único número sem discriminar. O usuário precisa ver de relance quanto é dados metered vs infraestrutura fixa.
+- **Headline**: custo total (ER DTO + Circuit + Gateway + VPN + vWAN Hub)
+- **Chips separados** para cada componente:
+  - `⬇DTO R$ X.XXX` (chip vermelho) — ER metered
+  - `🔌Circuit R$ X.XXX` (chip azul) — ER circuit fixo
+  - `🔌ER GW R$ X.XXX` (chip azul) — ER gateway fixo
+  - `🔐VPN R$ X.XXX` (chip roxo) — VPN gateway fixo
+  - `🌐vWAN R$ X.XXX` (chip azul) — vWAN hub fixo
 
 **Tooltip do nó On-Premises:**
 - Headline com custo total
-- Seção "Resumo de custos" com cada componente em linha separada:
-  - ⬇ DTO (dados metered): custo
-  - ⬆ DTI (entrada): GRÁTIS
-  - 🔌 Circuitos ER (fixo mensal): custo
-  - 🔌 Gateway ER (fixo): custo
-- Seções per-hub (para cada subscription com ER), mostrando:
-  - DTO com volume + custo
-  - DTI com volume + GRÁTIS
-  - Circuitos ER com custo
-  - Gateway ER com custo
-- Explicação: "DTO = dados metered cobrados por GB de saída. Circuito = custo fixo mensal. Gateway = custo fixo do recurso de gateway."
+- Resumo com cada componente discriminado
+- Seções per-hub ER (DTO, DTI, Circuit, Gateway)
+- Seções per-hub VPN (custo VPN, custo vWAN Hub)
+- Nota ⚠️ (se houver VPN hubs): "Dados VPN aparecem como Bandwidth genérica na fatura EA (sem meter separado). O custo de dados VPN está embutido no nó Internet, não neste edge."
 
-#### 3.6.2 Edges de Peering/Internet
-- ⬇ DTO + ⬆ DTI com volumes e custos
+### 3.6.1.1 Limitação: Tráfego VPN não segregável na fatura EA
+
+O Azure cobra dados que trafegam pelo túnel VPN IPSec como `MeterCategory = "Bandwidth"` + `MeterName = "Standard Data Transfer Out"` — **exatamente o mesmo meter** que qualquer outro egress para a internet pública. Não há como distinguir na fatura EA se o tráfego saiu para a internet ou passou pelo VPN.
+
+**Impacto no diagrama**:
+- O edge `onprem_vpn` mostra **apenas custos fixos** de infraestrutura (VPN Gateway + vWAN Hub)
+- O custo de **dados** VPN está embutido no `internet_egress` e aparece no nó Internet
+- O nó Internet pode estar **levemente inflado** com tráfego VPN
+
+**Notas obrigatórias no diagrama** (apenas quando `vpnHubSubs.length > 0`):
+1. **Tooltip do nó Internet**: `"⚠️ Pode incluir tráfego VPN não segregável. O Azure cobra dados VPN como Bandwidth genérica — não há meter separado na fatura EA."`
+2. **Tooltip do nó On-Premises**: `"⚠️ Dados VPN aparecem como Bandwidth genérica na fatura EA (sem meter separado). O custo de dados VPN está embutido no nó Internet, não neste edge."`
+3. **Tooltip do edge VPN**: Explicar que o valor mostrado é apenas infraestrutura fixa
+
+#### 3.6.2 Edges de Peering/Internet/Inter-Region
+- **Peering**: ⬇ DTO + ⬆ DTI com volumes e custos
+- **Internet**: ⬇ DTO (Bandwidth egress + Front Door DTO) + ⬆ DTI. Se houver VPN hubs, tooltip inclui nota ⚠️ sobre possível tráfego VPN não segregável.
+- **Inter-Region** (NOVO): ↔ tráfego cross-region Azure com volume + custo. Cor laranja, dashed (`stroke-dasharray: 8,4`). Conecta nó source ao hub em outra região (ou hub mais próximo). Não é internet.
 
 **IMPORTANTE**: O custo total do edge (`tc`) para cálculo de espessura e labels deve incluir **apenas**:
 - `doc + dic` (custos de data transfer ER metered)
@@ -389,29 +447,39 @@ O tooltip mostra:
   - Lista de subscriptions que usam essa saída
   - **Total global de Internet** (todas as regiões somadas)
 
-### 3.11 Barra de Filtros por Componente de Rede
+### 3.11 Filtros por Componente de Rede — Dropdown/Popover
 
-Barra horizontal fixa abaixo do toolbar (`#filterBar`, `position:fixed; top:44px`). Permite filtrar subscriptions por **tipo de componente de rede** que possuem.
+Botão "Filtros" na barra fixa abaixo do toolbar abre um **dropdown/popover** com chips de componentes em grid wrap. Essa abordagem escala para qualquer número de tipos de serviço sem quebrar o layout horizontal.
 
-#### 3.11.1 Chips de Componente
+#### 3.11.1 Estrutura
+- **Botão `#btnFilterOpen`**: texto "🔍 Filtros" (sem filtros ativos) ou "🔍 Filtros (N)" (com N filtros ativos). Borda azul quando há filtros ativos.
+- **Controles inline** (sempre visíveis, à esquerda após o botão): `#filterMode` (OR/AND), `#filterCount` (X/Y subs), `#filterClear` (✕). Agrupados com o botão porque são parte da mesma funcionalidade de filtro.
+- **Separador** (`.fsep`): divide controles dos chips ativos.
+- **`#activeChips`**: container inline que mostra **apenas os chips ativos** (à direita do separador). Scroll horizontal se necessário.
+- **`#filterDropdown`**: popover `position:fixed` abaixo da filter bar, com todos os chips em `flex-wrap:wrap`. Background `--sf`, border-radius 12px, box-shadow.
+- **`#filterOverlay`**: overlay transparente `position:fixed` full-screen para fechar o dropdown ao clicar fora.
+- Fecha com: click no overlay, tecla Escape, ou click no botão Filtros novamente.
+
+#### 3.11.2 Chips de Componente (dentro do dropdown)
 - Para cada tipo de recurso de rede que **existe nos dados** (count > 0), gerar um chip clicável
-- Tipos possíveis (mesma lista da seção 1.2): `expressroute_circuit`, `expressroute_gateway`, `vpn_gateway`, `firewall`, `private_endpoint`, `private_link`, `nat_gateway`, `load_balancer`, `app_gateway`, `vnet_peering`, `public_ip`, `dns`, `bastion`, `front_door`, `network_watcher`
+- Tipos possíveis (mesma lista da seção 1.2 — **excluindo `expressroute_data`**): `expressroute_circuit`, `expressroute_gateway`, `vpn_gateway`, `vwan_hub`, `vwan_er_gateway`, `vwan_vpn_gateway`, `firewall`, `firewall_manager`, `private_endpoint`, `private_link`, `nat_gateway`, `load_balancer`, `app_gateway`, `vnet_peering`, `public_ip`, `dns`, `bastion`, `front_door`, `network_watcher`
 - Cada chip mostra: ícone + nome + `(N)` onde N = quantidade de subs que possuem esse recurso
 - **Chips não presentes nos dados são omitidos** (não mostrar chip com count 0)
 - Ao clicar, o chip alterna entre ativo (highlight azul) e inativo
-- Chips ativos filtram o diagrama: apenas subscriptions que possuem os componentes selecionados são exibidas
+- Chips ativos aparecem também inline na barra (`#activeChips`) para feedback visual sem abrir o dropdown
+- Clicar num chip ativo na barra inline desativa o filtro
 
-#### 3.11.2 Modo de Filtro (AND / OR)
-- Toggle clicável que alterna entre `OR` e `AND`
+#### 3.11.3 Modo de Filtro (AND / OR)
+- Toggle clicável que alterna entre `OR` e `AND` (na barra, sempre visível)
 - **OR** (padrão): mostra subscriptions que possuem **qualquer um** dos componentes selecionados
 - **AND**: mostra subscriptions que possuem **todos** os componentes selecionados simultaneamente
 - Útil para investigação: "quais subs têm Firewall E Private Endpoint ao mesmo tempo?"
 
-#### 3.11.3 Contador e Botão Limpar
-- `#filterCount`: texto `X/Y subs` mostrando quantas subscriptions passam pelo filtro atual
-- `#filterClear`: botão "✕ Limpar" que desativa todos os chips e restaura visão completa
+#### 3.11.4 Contador e Botão Limpar
+- `#filterCount`: texto `X/Y subs` mostrando quantas subscriptions passam pelo filtro atual (na barra, sempre visível)
+- `#filterClear`: botão "✕" que desativa todos os chips e restaura visão completa (na barra, sempre visível)
 
-#### 3.11.4 Comportamento ao Filtrar
+#### 3.11.5 Comportamento ao Filtrar
 - Quando filtros estão ativos, `buildData()` filtra `DATA_ALL` **antes** de aplicar top-N e agregação
 - Subscriptions que não passam no filtro **não aparecem** no diagrama (nem em nós "Outros")
 - Regiões sem subscriptions visíveis não geram region box
@@ -482,17 +550,22 @@ Painel lateral retrátil à direita (`#subPanel`, `width:280px`, `transform:tran
 | Especial (On-Prem, Internet) | `--ft` | Border dashed |
 
 ### 4.3 Edges
-- **Espessura** proporcional ao custo: `max(2, min(9, cost/5000))` pixels
+- **Espessura** proporcional ao custo, **relativa ao máximo do dataset**: `EDGE_MIN_W + (EDGE_MAX_W - EDGE_MIN_W) * (cost / maxCost)` onde `maxCost` é o maior custo entre todos os edges. Isso garante que o edge mais caro sempre tenha espessura máxima e os demais se distribuem proporcionalmente, independente da magnitude absoluta dos custos. **NÃO usar fórmula fixa** como `cost/5000` — isso só funciona para um range específico de custos.
 - **Opacidade**: 0.45 para edges > R$ 1.500, 0.18 para edges menores
-- **ExpressRoute**: `stroke-dasharray: 12,6`
+- **Cores e estilos por tipo de edge**:
+  - **ExpressRoute → On-Prem** (`onprem_er`): azul `#4aa3e8`, dashed (`stroke-dasharray: 12,6`)
+  - **VPN → On-Prem** (`onprem_vpn`): cinza `#8b95ab`, dotted (`stroke-dasharray: 6,4`) — distinto do ER
+  - **Internet**: vermelho `#f05555`, sólido
+  - **Inter-Region**: laranja `#f0a030`, dashed (`stroke-dasharray: 8,4`)
+  - **Peering**: roxo `#a87de0`, sólido
 - **Labels**: Apenas em edges com custo > R$ 1.500, com fundo semi-transparente para legibilidade
 - **Hit area**: Linha invisível de 24px de largura para hover
 - **Anchor points de nós especiais**: As linhas de conexão devem se ancorar nos pontos lógicos de cada nó, não no centro:
   - **On-Premises** (base da tela): linhas chegam pela **parte superior** da caixa (`y = pt.y`)
   - **Internet** (topo da tela): linhas chegam pela **parte inferior** da caixa (`y = pt.y + pt.h`)
-  - **Hub → On-Prem**: a linha sai da **base** do hub (`y = pf.y + pf.h`)
+  - **Hub → On-Prem** (ER ou VPN): a linha sai da **base** do hub (`y = pf.y + pf.h`)
   - **Node → Internet**: a linha sai do **topo** do nó (`y = pf.y`)
-  - **Peering (node ↔ hub)**: usa o **centro** (`y = pos.y + pos.h/2`) em ambos os lados
+  - **Peering/Inter-Region (node ↔ hub)**: usa o **centro** (`y = pos.y + pos.h/2`) em ambos os lados
 
 ### 4.4 Region Boxes
 - Border dashed com cor da região, border-radius 18px
@@ -525,25 +598,53 @@ Cada nó mostra mini-badges com fluxos relevantes:
 | 20 | Edge labels (SVG separado) | none | DTO/DTI com fundo |
 | 97 | Botão toggle sub panel | auto | Abrir/fechar painel |
 | 98 | Sub panel lateral | auto | Lista de subscriptions |
-| 99 | Filter bar | auto | Chips de filtro |
+| 99 | Filter bar | auto | Botão filtros + chips ativos |
 | 100 | Toolbar | auto | Controles principais |
+| 100 | Filter overlay | auto (transparent) | Fechar dropdown ao clicar fora |
+| 101 | Filter dropdown popover | auto | Grid de chips de filtro |
 
 **IMPORTANTE**: Linhas SEMPRE acima das region boxes para que hover funcione em qualquer lugar. Edge labels SEMPRE acima dos node cards para legibilidade.
 
-### 4.7 Filter Bar (CSS)
+### 4.7 Filter Bar e Dropdown (CSS)
 ```css
 #filterBar {
   position:fixed; top:44px; left:0; right:0; z-index:99;
   display:flex; align-items:center; gap:6px;
-  padding:6px 16px; background:var(--sf);
+  padding:4px 12px; background:var(--sf);
   border-bottom:1px solid var(--bd);
-  font-size:12px; flex-wrap:wrap; min-height:36px;
+  font-size:12px; flex-wrap:nowrap; height:36px;
 }
+#btnFilterOpen {
+  background:var(--cd); border:1px solid var(--bd);
+  border-radius:8px; padding:3px 10px; cursor:pointer;
+  font-size:11px; white-space:nowrap;
+}
+#btnFilterOpen.has-active { border-color:var(--bl); color:var(--bl); }
+#activeChips {
+  display:flex; gap:4px; flex:1; min-width:0;
+  overflow-x:auto; scrollbar-width:none;
+}
+#filterDropdown {
+  position:fixed; top:80px; left:12px; z-index:101;
+  background:var(--sf); border:1px solid var(--bd);
+  border-radius:12px; padding:12px;
+  box-shadow:0 8px 32px rgba(0,0,0,.5);
+  display:none; max-width:460px; min-width:280px;
+}
+#filterDropdown.open { display:block; }
+#filterDropdown .fd-grid { display:flex; flex-wrap:wrap; gap:6px; }
+#filterOverlay {
+  position:fixed; top:0; left:0; right:0; bottom:0;
+  z-index:100; display:none;
+}
+#filterOverlay.open { display:block; }
 ```
-- Chips (`.fchip`): `border-radius:14px`, `border:1.5px solid var(--bd)`, transição suave
-- Chip ativo (`.fchip.active`): `border-color:var(--bl); background:rgba(74,163,232,.18); color:var(--bl)`
-- Toggle AND/OR (`#filterMode`): `border:1.5px solid var(--pu); color:var(--pu)`
-- Separador (`.fsep`): `width:1px; height:20px; background:var(--bd)`
+- Botão Filtros: muda para "🔍 Filtros (N)" quando N filtros ativos
+- Chips ativos inline (`#activeChips`): scroll horizontal invisível, clicáveis para desativar
+- Dropdown: grid wrap com todos os chips, abre/fecha com toggle
+- Overlay: fecha dropdown ao clicar fora
+- Escape: fecha dropdown via `document.addEventListener('keydown')`
+- `adjustLayout()`: chamado no init e window.resize para ajustar canvas top dinamicamente
 
 ### 4.8 Subscription Panel (CSS)
 ```css
@@ -613,23 +714,32 @@ O gerador deve funcionar automaticamente para:
 
 | Topologia | Como detectar | Layout |
 |---|---|---|
-| **Hub-spoke com ExpressRoute** | Subscription com `expressroute_circuit` ou `expressroute_gateway` | Hub na base da region box, ER connection para On-Prem |
-| **Hub-spoke com VPN** | Subscription com `vpn_gateway` | Hub na base da region box, **sem linha para On-Prem** — VPN transita pela internet |
+| **Hub-spoke com ExpressRoute** | Subscription com `expressroute_circuit` ou `expressroute_gateway` | Hub na base da region box, edge ER (azul dashed) para On-Prem |
+| **Hub-spoke com VPN** | Subscription com `vpn_gateway` ou `vwan_vpn_gateway` | Hub na base da region box, edge VPN (cinza dotted) para On-Prem |
+| **Hub-spoke com Virtual WAN** | Subscription com `vwan_hub` + `vwan_er_gateway` e/ou `vwan_vpn_gateway` | Hub na base da region box, edges ER e/ou VPN para On-Prem |
 | **Multi-hub** | Múltiplas subscriptions com ER ou VPN | Cada hub na base da sua region box; se na mesma região, distribuir horizontalmente |
-| **Cloud-only (sem on-prem)** | Nenhuma subscription com ER/VPN | Sem nó On-Prem; hub é a subscription com mais peering |
-| **Multi-region** | Subscriptions em regiões diferentes | Agrupar por região com layout geográfico |
+| **Cloud-only (sem on-prem)** | Nenhuma subscription com ER/VPN/vWAN | Sem nó On-Prem; hub é a subscription com mais peering |
+| **Multi-region** | Subscriptions em regiões diferentes | Agrupar por região com layout por custo |
 | **Single-region** | Todas na mesma região | Layout simples em grid |
 
 ### Detecção automática de Hub
 1. Se há subscription com `expressroute_circuit` → é hub
-2. Se há subscription com `vpn_gateway` → é hub  
-3. Se nenhum ER/VPN, a subscription com mais `vnet_peering` ingress = hub
-4. Se múltiplos hubs **na mesma região**, distribuir horizontalmente na base da region box
-5. Hubs em **regiões diferentes** ficam cada um na base da sua respectiva region box
+2. Se há subscription com `expressroute_gateway` → é hub
+3. Se há subscription com `vpn_gateway` → é hub
+4. Se há subscription com `vwan_hub`, `vwan_er_gateway` ou `vwan_vpn_gateway` → é hub
+5. Se nenhum ER/VPN/vWAN, a subscription com mais `vnet_peering` ingress = hub
+6. Se múltiplos hubs **na mesma região**, distribuir horizontalmente na base da region box
+7. Hubs em **regiões diferentes** ficam cada um na base da sua respectiva region box
+
+### Classificação de Hub para edges On-Premises
+- **erHubSubs**: hubs com `expressroute_circuit` OU `expressroute_gateway` OU `vwan_er_gateway` → geram edge tipo `onprem_er`
+- **vpnHubSubs**: hubs com `vpn_gateway` OU `vwan_vpn_gateway` → geram edge tipo `onprem_vpn`
+- Se um hub tem ER + VPN, ele aparece em **ambas** as listas e gera **dois edges** distintos para On-Premises
 
 ### Detecção de On-Premises
-- Se há **ExpressRoute** (circuit ou gateway) → mostrar nó On-Premises
-- Se há apenas VPN (sem ER) → **NÃO** mostrar nó On-Premises (VPN transita pela internet)
+- Se há **ExpressRoute** (circuit, gateway, vWAN ER) → mostrar nó On-Premises + edge ER
+- Se há **VPN** (gateway, vWAN VPN S2S) → mostrar nó On-Premises + edge VPN
+- Se há ER + VPN → mostrar nó On-Premises com **ambos edges** (estilos visuais distintos)
 - Se não há ER nem VPN → omitir nó On-Premises
 
 ---
@@ -663,6 +773,20 @@ O gerador deve funcionar automaticamente para:
 - [ ] Explicações contextuais em cada seção do tooltip
 - [ ] Funciona com qualquer número de subscriptions (1 a 100+)
 - [ ] Funciona com ou sem ExpressRoute/VPN
+- [ ] VPN Gateway gera edge para On-Premises (cinza dotted, distinto do ER azul dashed)
+- [ ] Virtual WAN detectado como hub (vwan_hub, vwan_er_gateway, vwan_vpn_gateway)
+- [ ] Virtual WAN ER Scale Unit acumulado em expressroute_gateway_cost
+- [ ] Virtual WAN VPN S2S Scale Unit acumulado em vpn_cost
+- [ ] Bandwidth Inter-Region separado de Internet Egress (interregion_egress, não internet_egress)
+- [ ] Inter-Region edges com cor laranja e dash distinto
+- [ ] Private Link split em 3: PE hourly (infra) + Ingress data (flow) + Egress data (flow)
+- [ ] Private Link data processed mostrado como flow com volume no tooltip (não apenas custo fixo)
+- [ ] Application Gateway separado de Load Balancer (appgw_cost ≠ lb_cost)
+- [ ] Azure Front Door Service mapeado (com "Service" no nome)
+- [ ] Front Door split: DTO/DTI (egress/ingress) + infra (Base Fees, Requests)
+- [ ] Azure Firewall Manager separado de Azure Firewall
+- [ ] DNS tem acumulador próprio (dns_cost)
+- [ ] Espessura de edge relativa ao max cost do dataset (não fórmula fixa /5000)
 - [ ] Internet separada por região (um nó por região com tráfego)
 - [ ] Tooltip de Internet mostra tráfego agregado da região + total global
 - [ ] Botão expandir/contrair "Outros" funciona em ciclos múltiplos
