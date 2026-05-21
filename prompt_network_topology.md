@@ -520,8 +520,8 @@ Cada nó mostra mini-badges com fluxos relevantes:
 |---|---|---|---|
 | 2 | Region boxes (borda visual) | none (interior) | Agrupamento visual |
 | 8 | SVG edges + hit areas | stroke (24px invisível) | Linhas de conexão + hover |
-| 10 | Node cards (divs) | auto | Caixas de subscription |
 | 12 | Region drag handles (borda + label) | auto | Arrastar regiões |
+| 14 | Node cards (divs) | auto | Caixas de subscription |
 | 20 | Edge labels (SVG separado) | none | DTO/DTI com fundo |
 | 97 | Botão toggle sub panel | auto | Abrir/fechar painel |
 | 98 | Sub panel lateral | auto | Lista de subscriptions |
