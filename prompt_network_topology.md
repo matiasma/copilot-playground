@@ -49,9 +49,12 @@ Processar o CSV em streaming. Para cada linha com `MeterCategory` de rede (`Virt
 
 A classificação dentro de `MeterCategory = "ExpressRoute"` segue esta ordem:
 1. Se `MeterSubCategory` contém "Gateway" ou `MeterName` contém "ErGw" → `expressroute_gateway_cost`
-2. Se `MeterName` contém "Circuit" → `expressroute_circuit_cost`
-3. Se `MeterName` contém "Metered Data" (sem "Circuit") ou "Data Transfer" → `expressroute_out_gb/cost` ou `expressroute_in_gb/cost`
-4. Catch-all ER → `expressroute_out` (tráfego metered genérico)
+2. Se `MeterName` contém "Circuit" → `expressroute_circuit_cost` — **independente** de o nome também conter "Metered" (ex: `Premium Metered Data 10 Gbps Circuit` deve ir para circuit, NÃO para metered data)
+3. Se `MeterName` contém "Metered Data" ou "Transfer Out" → `expressroute_out_gb/cost`
+4. Se `MeterName` contém "Data Transfer In" ou "Transfer In" → `expressroute_in_gb/cost`
+5. Catch-all ER → `expressroute_out` (tráfego metered genérico)
+
+**ATENÇÃO — Armadilha conhecida**: Alguns `MeterName` de circuitos contêm simultaneamente as palavras "Metered Data" e "Circuit" (ex: `Premium Metered Data 10 Gbps Circuit`, `Standard Metered Data 2 Gbps Circuit`). A regra "Circuit" **DEVE** ser avaliada **ANTES** de "Metered Data" e **SEM** excluir nomes que contenham "metered". Se a condição for `"circuit" in nl and "metered" not in nl`, esses circuitos serão classificados erroneamente como DTO metered data, inflando o valor de DTO e zerando o custo de circuit. Isso é um bug grave que distorce completamente os custos no diagrama.
 
 Para `MeterCategory = "VPN Gateway"` → acumular direto em `vpn_cost`.
 
@@ -180,7 +183,7 @@ O `#canvas` deve ter `top:80px` (toolbar 44px + filterBar 36px) para não ficar 
 
 1. **Hubs na PARTE INFERIOR da sua região** — subscriptions com ExpressRoute ou VPN Gateway são posicionadas na **base da region box** da sua respectiva região Azure (pois se conectam para baixo ao On-Premises). Se houver mais de um hub na mesma região, distribuir horizontalmente na base. **NÃO** posicionar hubs numa faixa separada fora das region boxes.
 2. **Spokes acima dos hubs** — subscriptions normais (spokes) são organizadas em grid **acima** dos hubs dentro da mesma region box.
-3. **On-Premises** = posicionado na **base** do desenho (abaixo das regiões)
+3. **On-Premises** = posicionado na **base** do desenho (abaixo das regiões). A posição Y deve ser calculada **dinamicamente** a partir do `maxY` real de todas as region boxes (`max(rb.y + rb.h)`) + margem de 80px — **nunca usar offset fixo** (ex: `baseY + 500`) pois region boxes de tamanhos variáveis causam overlap. Centralizado horizontalmente entre `minRegX` e `maxRegX`.
 3. **Internet** = **um nó por região Azure** que tem tráfego de internet significativo, posicionado **acima** de cada região. Cada nó Internet mostra o custo de egress daquela região e, no tooltip, lista as subscriptions, tráfego agregado, e o total global de Internet. Preço de egress varia por região (Brasil ~2x mais caro que EUA) — essa separação é essencial para otimização.
 4. **Subscriptions normais (spokes)** = organizadas em grid acima dos hubs, dentro da mesma region box
 5. **Regiões Azure** = caixas tracejadas agrupando **TODAS** as subscriptions da mesma região (hubs + spokes). Posicionadas **por custo total de rede (maior custo no centro)**:
@@ -200,17 +203,24 @@ O `#canvas` deve ter `top:80px` (toolbar 44px + filterBar 36px) para não ficar 
    - O nó "Outros" regional mostra no tooltip a lista de subs agregadas com custo individual
    - **Peering edges** das subs agregadas no "Outros" regional são somados no edge do nó agregado (como no "Outros" global)
    - Constante `MAX_SPOKES_PER_REGION = 6` configurável
-7. **Collision avoidance em 3 fases** (ver seção 2.4)
+7. **Collision avoidance em 4 fases** (ver seção 2.4)
 
-### 2.4 Collision Avoidance — 3 Fases
+### 2.4 Collision Avoidance — 4 Fases
 
-**NUNCA** usar um loop global que empurra todos os nós indiscriminadamente. Isso causa drift de nós entre regiões. Usar **3 fases sequenciais**:
+**NUNCA** usar um loop global que empurra todos os nós indiscriminadamente. Isso causa drift de nós entre regiões. Usar **4 fases sequenciais**:
 
 **Fase 1 — Intra-região**: Para cada região, resolver sobreposições apenas entre os nós daquela região. Nós de regiões diferentes **não interagem** nesta fase. Isso mantém cada cluster coeso.
 
 **Fase 2 — Inter-região (box separation)**: Tratar cada region box como um retângulo e verificar sobreposição entre pares de region boxes. Se duas boxes se sobrepõem, empurrar **todas as suas nodes juntas** na direção de menor sobreposição (horizontal ou vertical). Recalcular os bounds da region box após cada empurrão. Iterar até convergir (~50 iterações).
 
 **Fase 3 — Nós especiais**: Resolver sobreposições entre nós especiais (`__onprem__`, `__inet_*__`) e todos os nós regulares. Isso posiciona On-Premises e Internet sem conflito com as regiões.
+
+**Fase 4 — Enforce On-Premises na base**: Após todas as fases de collision avoidance, **re-enforce** que o nó On-Premises fique **abaixo** de todas as region boxes:
+1. Calcular `maxRegY` = maior `rb.y + rb.h` de todos os region boxes
+2. Se `pos['__onprem__'].y < maxRegY + 60`, forçar `pos['__onprem__'].y = maxRegY + 80`
+3. Centralizar horizontalmente: `pos['__onprem__'].x = (minRegX + maxRegX)/2 - width/2`
+
+Isso é necessário porque a Fase 3 pode empurrar On-Premises para cima ou para os lados ao resolver colisões com outros nós especiais.
 
 ### 2.5 Recálculo de Region Boxes Pós-Render
 
@@ -283,6 +293,16 @@ Ao passar o mouse sobre qualquer caixa de subscription, exibir **tooltip flutuan
 Ao passar o mouse sobre uma linha de conexão, exibir tooltip com:
 - Tipo de conexão
 - **Custo total da conexão** (destaque) = soma de DTO + DTI + custos fixos de infraestrutura
+- Cada componente de custo em **linha separada**: DTO (volume + custo), DTI (volume + custo ou GRÁTIS), Circuit (custo fixo), etc.
+
+**REGRA FUNDAMENTAL DE EXIBIÇÃO DE CUSTOS**: Nunca somar custos de natureza diferente em uma única linha. Cada tipo de custo deve ser exibido **separadamente** com seu próprio label:
+- **DTO (dados metered)**: custo por GB de saída — mostrar volume + custo
+- **DTI (entrada)**: tipicamente grátis — mostrar volume + "GRÁTIS"
+- **Circuito ER (fixo mensal)**: custo fixo do circuito — linha separada com ícone 🔌
+- **Gateway ER (fixo)**: custo fixo do gateway — linha separada com ícone 🔌
+- **VPN Gateway (fixo)**: custo fixo — linha separada
+
+O `totalCost` no headline é a soma de todos (visão rápida), mas abaixo **cada componente aparece individualmente**.
 
 #### 3.6.1 Edge para On-Premises — APENAS ExpressRoute
 
@@ -298,6 +318,28 @@ O tooltip mostra:
 **Estilo visual:** azul dashed (`stroke-dasharray: 12,6`)
 
 **Nó On-Premises:** mostrado apenas se existir pelo menos 1 hub com ExpressRoute (`erHubSubs.length > 0`). Se o cliente só tem VPN (sem ER), o nó On-Premises **não aparece**.
+
+**Card do nó On-Premises:**
+- **Headline**: custo total (DTO + DTI + Circuit + Gateway) como visão rápida
+- **Chips separados** para cada componente de custo:
+  - `⬇DTO R$ X.XXX` (chip vermelho) — custo de dados metered
+  - `🔌Circuit R$ X.XXX` (chip azul) — custo fixo dos circuitos
+  - `🔌Gateway R$ X.XXX` (chip azul) — custo fixo dos gateways
+- **NUNCA** somar DTO + Circuit em um único número sem discriminar. O usuário precisa ver de relance quanto é dados metered vs infraestrutura fixa.
+
+**Tooltip do nó On-Premises:**
+- Headline com custo total
+- Seção "Resumo de custos" com cada componente em linha separada:
+  - ⬇ DTO (dados metered): custo
+  - ⬆ DTI (entrada): GRÁTIS
+  - 🔌 Circuitos ER (fixo mensal): custo
+  - 🔌 Gateway ER (fixo): custo
+- Seções per-hub (para cada subscription com ER), mostrando:
+  - DTO com volume + custo
+  - DTI com volume + GRÁTIS
+  - Circuitos ER com custo
+  - Gateway ER com custo
+- Explicação: "DTO = dados metered cobrados por GB de saída. Circuito = custo fixo mensal. Gateway = custo fixo do recurso de gateway."
 
 #### 3.6.2 Edges de Peering/Internet
 - ⬇ DTO + ⬆ DTI com volumes e custos
@@ -595,6 +637,10 @@ O gerador deve funcionar automaticamente para:
 ## 7. CHECKLIST DE QUALIDADE
 
 - [ ] Todas as setas ⬇=DTO(cobra), ⬆=DTI(grátis) — **NUNCA inverter**
+- [ ] Custos de natureza diferente NUNCA somados em uma única linha (DTO, Circuit, Gateway são linhas separadas)
+- [ ] On-Premises card mostra chips separados para DTO, Circuit, Gateway (não um número único misturado)
+- [ ] On-Premises tooltip mostra resumo com cada componente discriminado + detalhes per-hub
+- [ ] Edge tooltip mostra totalCost no headline + componentes individuais abaixo (DTO, Circuit separados)
 - [ ] Cada caixa é um div HTML independente, não Canvas
 - [ ] Hover tooltip funciona em TODOS os nós E em TODAS as linhas
 - [ ] Tooltip mostra inventário de recursos (ER Gateway, ER Circuit, VPN, Private Endpoint, etc.)
@@ -603,8 +649,11 @@ O gerador deve funcionar automaticamente para:
 - [ ] Nós individuais são arrastáveis (linhas acompanham)
 - [ ] Collision avoidance evita sobreposição
 - [ ] On-Premises na BASE, Internet **por região no TOPO**, Hub(s) **na base da sua region box**
+- [ ] On-Premises posicionado dinamicamente via `maxY` das region boxes (nunca offset fixo)
+- [ ] Collision avoidance Fase 4 re-enforça On-Premises abaixo de todas as regiões
 - [ ] Subscriptions agrupadas por região com caixas tracejadas (hubs + spokes dentro da mesma box)
-- [ ] Collision avoidance em 3 fases: intra-região → inter-região → especiais (NUNCA global indiscriminado)
+- [ ] Collision avoidance em 4 fases: intra-região → inter-região → especiais → enforce On-Prem base (NUNCA global indiscriminado)
+- [ ] On-Premises renderizado por função dedicada `renderOnPrem()` (não por `renderSpecial()`) com chips de breakdown e tooltip
 - [ ] Region boxes recalculadas pós-render com alturas reais do DOM
 - [ ] Dark theme padrão com toggle para light
 - [ ] Controles de fonte (A−/A+/A⟲)
