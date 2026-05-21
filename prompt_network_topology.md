@@ -15,6 +15,7 @@ Gere um **diagrama HTML interativo standalone** (arquivo único, sem backend) qu
 - Agrupamento geográfico por região Azure
 - Inventário de recursos de rede por subscription
 - Interatividade: drag & drop, zoom, hover com detalhes
+- **Filtros interativos**: barra de filtros por tipo de componente de rede + painel lateral de subscriptions com toggle individual
 
 ---
 
@@ -138,8 +139,30 @@ Isso garante que **nenhum custo de rede é silenciosamente descartado**, mesmo p
 - **CSS Custom Properties**: Dark/light theme
 - **JavaScript vanilla**: Drag & drop, pan, zoom, tooltips, regiões arrastáveis
 
-**Estrutura HTML correta do canvas:**
+**Estrutura HTML correta do layout:**
 ```html
+<div id="toolbar">...</div>
+<div id="filterBar">
+  <span class="flabel">🔍 Filtro por componente:</span>
+  <div id="fchips"></div>
+  <div class="fsep"></div>
+  <span id="filterMode" onclick="toggleFilterMode()">OR</span>
+  <span id="filterCount"></span>
+  <button id="filterClear" onclick="clearFilters()">✕ Limpar</button>
+</div>
+<button id="btnSubPanel" onclick="toggleSubPanel()">📋 Subscriptions</button>
+<div id="subPanel">
+  <div class="sp-header">
+    <span class="sp-title">Subscriptions</span>
+    <button onclick="subSelectAll()">All</button>
+    <button onclick="subSelectNone()">None</button>
+    <button onclick="subSelectProd()">PROD</button>
+    <button onclick="subSelectDev()">DEV</button>
+  </div>
+  <input class="sp-search" id="subSearch" placeholder="Buscar..." oninput="renderSubList()">
+  <div id="subList"></div>
+  <div class="sp-footer" id="subFooter"></div>
+</div>
 <div id="canvas">
   <div id="world">
     <svg id="svgEdges" style="position:absolute;top:0;left:0;width:1px;height:1px;pointer-events:none;z-index:8;overflow:visible"></svg>
@@ -148,6 +171,8 @@ Isso garante que **nenhum custo de rede é silenciosamente descartado**, mesmo p
   </div>
 </div>
 ```
+
+O `#canvas` deve ter `top:80px` (toolbar 44px + filterBar 36px) para não ficar atrás das barras fixas.
 
 **IMPORTANTE**: O `transform` (translate + scale) é aplicado APENAS no `#world`. Como os SVGs estão dentro, eles herdam o transform automaticamente. **NÃO** aplicar transform separado nos SVGs — isso causa desalinhamento entre edges e nós ao fazer zoom ou pan.
 
@@ -158,11 +183,14 @@ Isso garante que **nenhum custo de rede é silenciosamente descartado**, mesmo p
 3. **On-Premises** = posicionado na **base** do desenho (abaixo das regiões)
 3. **Internet** = **um nó por região Azure** que tem tráfego de internet significativo, posicionado **acima** de cada região. Cada nó Internet mostra o custo de egress daquela região e, no tooltip, lista as subscriptions, tráfego agregado, e o total global de Internet. Preço de egress varia por região (Brasil ~2x mais caro que EUA) — essa separação é essencial para otimização.
 4. **Subscriptions normais (spokes)** = organizadas em grid acima dos hubs, dentro da mesma region box
-5. **Regiões Azure** = caixas tracejadas agrupando **TODAS** as subscriptions da mesma região (hubs + spokes). Posicionadas de forma a refletir geografia:
-   - Regiões do Brasil (brazilsouth) = centro
-   - Regiões dos EUA (EastUS, EastUS2, CentralUS, WestUS) = acima/direita
-   - Regiões da Europa = acima/esquerda
-   - Regiões da Ásia = direita
+5. **Regiões Azure** = caixas tracejadas agrupando **TODAS** as subscriptions da mesma região (hubs + spokes). Posicionadas **por custo total de rede (maior custo no centro)**:
+   - Ordenar regiões por custo total de rede (soma de `total_net_cost` de todas as subs daquela região), decrescente
+   - A região com **maior custo** fica na **posição central** do layout horizontal
+   - Regiões menores são distribuídas alternadamente à esquerda e à direita do centro
+   - Algoritmo: `regionOrder` = sorted desc por custo → `center = [0]`, `left = [3,1]` (prepend), `right = [2,4]` (append) → `orderedRegions = left + center + right`
+   - Exemplo com 3 regiões (BrazilSouth R$120k, EastUS2 R$20k, EastUS R$5k): EastUS fica à esquerda, BrazilSouth no centro, EastUS2 à direita
+   - **NÃO** usar posicionamento geográfico (latam=centro, US=direita, etc.) — a posição depende **exclusivamente do custo**
+   - Todas as regiões ficam no mesmo `baseY` (sem stagger vertical por geografia)
 6. **Top N global + Top M per-region** — dois níveis de agregação:
    - **Global**: Top 14-16 subscriptions por custo de rede são mostradas individualmente; restante agregadas em nó "Outros (X subs)" global com botão expandir/contrair
    - **Per-region**: Dentro de cada region box, se houver mais de **6 spokes** (excluindo hubs), mostrar apenas os **top 6 por custo** e agregar o restante em um nó **"Outros (RegionLabel: X subs)"** dentro da própria region box
@@ -319,6 +347,76 @@ O tooltip mostra:
   - Lista de subscriptions que usam essa saída
   - **Total global de Internet** (todas as regiões somadas)
 
+### 3.11 Barra de Filtros por Componente de Rede
+
+Barra horizontal fixa abaixo do toolbar (`#filterBar`, `position:fixed; top:44px`). Permite filtrar subscriptions por **tipo de componente de rede** que possuem.
+
+#### 3.11.1 Chips de Componente
+- Para cada tipo de recurso de rede que **existe nos dados** (count > 0), gerar um chip clicável
+- Tipos possíveis (mesma lista da seção 1.2): `expressroute_circuit`, `expressroute_gateway`, `vpn_gateway`, `firewall`, `private_endpoint`, `private_link`, `nat_gateway`, `load_balancer`, `app_gateway`, `vnet_peering`, `public_ip`, `dns`, `bastion`, `front_door`, `network_watcher`
+- Cada chip mostra: ícone + nome + `(N)` onde N = quantidade de subs que possuem esse recurso
+- **Chips não presentes nos dados são omitidos** (não mostrar chip com count 0)
+- Ao clicar, o chip alterna entre ativo (highlight azul) e inativo
+- Chips ativos filtram o diagrama: apenas subscriptions que possuem os componentes selecionados são exibidas
+
+#### 3.11.2 Modo de Filtro (AND / OR)
+- Toggle clicável que alterna entre `OR` e `AND`
+- **OR** (padrão): mostra subscriptions que possuem **qualquer um** dos componentes selecionados
+- **AND**: mostra subscriptions que possuem **todos** os componentes selecionados simultaneamente
+- Útil para investigação: "quais subs têm Firewall E Private Endpoint ao mesmo tempo?"
+
+#### 3.11.3 Contador e Botão Limpar
+- `#filterCount`: texto `X/Y subs` mostrando quantas subscriptions passam pelo filtro atual
+- `#filterClear`: botão "✕ Limpar" que desativa todos os chips e restaura visão completa
+
+#### 3.11.4 Comportamento ao Filtrar
+- Quando filtros estão ativos, `buildData()` filtra `DATA_ALL` **antes** de aplicar top-N e agregação
+- Subscriptions que não passam no filtro **não aparecem** no diagrama (nem em nós "Outros")
+- Regiões sem subscriptions visíveis não geram region box
+- Internet nodes e On-Premises se adaptam automaticamente
+- Ao ativar/desativar um filtro: `buildData() → applyRegionAgg() → computeLayout() → buildEdges() → render() → fitAll()`
+- Estado de expansão ("Outros" global e per-region) é resetado ao filtrar
+
+### 3.12 Painel de Subscriptions
+
+Painel lateral retrátil à direita (`#subPanel`, `width:280px`, `transform:translateX(100%)` quando fechado).
+
+#### 3.12.1 Estrutura
+- **Botão toggle** (`#btnSubPanel`): fixo no canto superior direito, texto "📋 Subscriptions" / "✕ Fechar"
+- **Header**: título + botões rápidos (All, None, PROD, DEV)
+- **Campo de busca**: filtra a lista por texto (case-insensitive)
+- **Lista de subscriptions** (`#subList`): scrollável, ordenada por custo de rede desc
+- **Footer** (`#subFooter`): mostra custo total visível em tempo real
+
+#### 3.12.2 Cada Linha da Lista
+- Checkbox (checked = visível, unchecked = oculta)
+- Badge de ambiente com cor (PROD verde, DEV laranja, UAT roxo)
+- Nome da subscription
+- Custo de rede formatado (R$ X.XXX)
+- Quando desmarcada: nome riscado (`text-decoration:line-through`), opacidade reduzida
+
+#### 3.12.3 Botões Rápidos
+| Botão | Ação |
+|---|---|
+| **All** | Marca todas as subscriptions como visíveis |
+| **None** | Desmarca todas |
+| **PROD** | Marca apenas subs com `env === 'PROD'`, desmarca as demais |
+| **DEV** | Marca apenas subs com `env === 'DEV'`, desmarca as demais |
+
+#### 3.12.4 Comportamento
+- Estado armazenado em `hiddenSubs = {}` (mapa `subLabel → true` para subs ocultas)
+- Ao marcar/desmarcar: mesma pipeline de `buildData()` → render
+- `buildData()` filtra `DATA_ALL` excluindo subs em `hiddenSubs` **antes** de aplicar filtros de componente e top-N
+- O canvas se ajusta: `canvas.style.right = '280px'` quando o painel está aberto, `'0'` quando fechado
+- Footer mostra soma de `total_net_cost` apenas das subs visíveis
+
+#### 3.12.5 Interação entre Filtros
+- Os dois filtros (componente + subscription) são **acumulativos**: uma sub precisa estar marcada no painel E passar no filtro de componente para aparecer no diagrama
+- Ordem de aplicação em `buildData()`:
+  1. Excluir subs em `hiddenSubs`
+  2. Se há `activeFilters`, aplicar filtro por componente (AND/OR)
+  3. Ordenar por custo, aplicar top-N, agregar "Outros"
+
 ---
 
 ## 4. DESIGN VISUAL
@@ -383,8 +481,42 @@ Cada nó mostra mini-badges com fluxos relevantes:
 | 10 | Node cards (divs) | auto | Caixas de subscription |
 | 12 | Region drag handles (borda + label) | auto | Arrastar regiões |
 | 20 | Edge labels (SVG separado) | none | DTO/DTI com fundo |
+| 97 | Botão toggle sub panel | auto | Abrir/fechar painel |
+| 98 | Sub panel lateral | auto | Lista de subscriptions |
+| 99 | Filter bar | auto | Chips de filtro |
+| 100 | Toolbar | auto | Controles principais |
 
 **IMPORTANTE**: Linhas SEMPRE acima das region boxes para que hover funcione em qualquer lugar. Edge labels SEMPRE acima dos node cards para legibilidade.
+
+### 4.7 Filter Bar (CSS)
+```css
+#filterBar {
+  position:fixed; top:44px; left:0; right:0; z-index:99;
+  display:flex; align-items:center; gap:6px;
+  padding:6px 16px; background:var(--sf);
+  border-bottom:1px solid var(--bd);
+  font-size:12px; flex-wrap:wrap; min-height:36px;
+}
+```
+- Chips (`.fchip`): `border-radius:14px`, `border:1.5px solid var(--bd)`, transição suave
+- Chip ativo (`.fchip.active`): `border-color:var(--bl); background:rgba(74,163,232,.18); color:var(--bl)`
+- Toggle AND/OR (`#filterMode`): `border:1.5px solid var(--pu); color:var(--pu)`
+- Separador (`.fsep`): `width:1px; height:20px; background:var(--bd)`
+
+### 4.8 Subscription Panel (CSS)
+```css
+#subPanel {
+  position:fixed; top:80px; right:0; width:280px; bottom:0; z-index:98;
+  background:var(--sf); border-left:1px solid var(--bd);
+  display:flex; flex-direction:column;
+  transform:translateX(100%); transition:transform .2s;
+}
+#subPanel.open { transform:translateX(0); }
+```
+- Cada linha (`.sub-row`): flex layout com checkbox + badge env + nome + custo
+- Badge de ambiente (`.sub-env`): cores por env (PROD=verde, DEV=laranja, UAT=roxo)
+- Sub oculta (`.sub-row.unchecked .sub-name`): `opacity:.4; text-decoration:line-through`
+- Botão toggle (`#btnSubPanel`): `position:fixed; top:82px; right:8px`, muda para `right:288px` quando painel aberto (`.shifted`)
 
 ---
 
@@ -490,3 +622,18 @@ O gerador deve funcionar automaticamente para:
 - [ ] Region boxes transparentes a cliques no interior (pointer-events:none)
 - [ ] Drag de região via borda/label — não bloqueia hover nas linhas
 - [ ] Todos os scripts e arquivos de apoio usam prefixo `[CLIENTE]_` no nome (ex: `Renner_net_flows.json`)
+- [ ] Barra de filtros por componente funcional com chips clicáveis (AND/OR)
+- [ ] Chips mostram apenas tipos de recurso presentes nos dados (count > 0)
+- [ ] Filtro AND mostra subs que têm TODOS os componentes selecionados
+- [ ] Filtro OR mostra subs que têm QUALQUER componente selecionado
+- [ ] Contador `X/Y subs` atualiza em tempo real ao filtrar
+- [ ] Botão "Limpar" reseta todos os filtros de componente
+- [ ] Painel lateral de subscriptions abre/fecha com toggle
+- [ ] Lista de subs ordenada por custo desc com checkbox, badge env, custo
+- [ ] Desmarcar sub remove nó, edges e custos do diagrama
+- [ ] Botões rápidos (All/None/PROD/DEV) funcionam corretamente
+- [ ] Busca textual filtra lista de subscriptions em tempo real
+- [ ] Footer do painel mostra custo total visível atualizado
+- [ ] Canvas ajusta `right` quando painel abre/fecha
+- [ ] Filtros de componente e subscription são acumulativos
+- [ ] Estado de expansão "Outros" reseta ao aplicar filtros
