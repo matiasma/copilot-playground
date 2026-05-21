@@ -32,14 +32,27 @@ Processar o CSV em streaming. Para cada linha com `MeterCategory` de rede (`Virt
 | `global_peering_ingress_gb/cost` | `MeterSubCategory` contém "Global Peering" + `MeterName` contém "Ingress" |
 | `internet_egress_gb/cost` | `MeterCategory` = "Bandwidth" + `MeterName` contém "Transfer Out" ou "Egress" |
 | `internet_ingress_gb/cost` | `MeterCategory` = "Bandwidth" + `MeterName` contém "Transfer In" ou "Ingress" |
-| `expressroute_out_gb/cost` | `MeterCategory` = "ExpressRoute" + `MeterName` contém "Transfer Out" ou "Egress" |
-| `expressroute_in_gb/cost` | `MeterCategory` = "ExpressRoute" + `MeterName` contém "Transfer In" ou "Ingress" |
+| `expressroute_out_gb/cost` | `MeterCategory` = "ExpressRoute" + `MeterName` contém "Metered Data" (sem "Circuit") ou "Transfer Out" |
+| `expressroute_in_gb/cost` | `MeterCategory` = "ExpressRoute" + `MeterName` contém "Data Transfer In" |
+| `expressroute_circuit_cost` | `MeterCategory` = "ExpressRoute" + `MeterName` contém "Circuit" (custo fixo mensal do circuito) |
+| `expressroute_gateway_cost` | `MeterCategory` = "ExpressRoute" + (`MeterSubCategory` contém "Gateway" ou `MeterName` contém "ErGw") |
+| `vpn_cost` | `MeterCategory` = "VPN Gateway" (custo fixo mensal do gateway VPN) |
 | `private_link_cost` | `MeterSubCategory` contém "Private Link" ou "Private Endpoint" |
 | `firewall_cost` | `MeterCategory` = "Azure Firewall" |
 | `nat_cost` | `MeterCategory` = "NAT Gateway" |
 | `lb_cost` | `MeterCategory` in ("Load Balancer", "Application Gateway") |
 | `total_net_cost` | Soma de todos os custos de rede |
 | `region` | `ResourceLocation` mais frequente |
+
+**IMPORTANTE — Custos de infraestrutura nos flows**: Os campos `expressroute_circuit_cost`, `expressroute_gateway_cost` e `vpn_cost` são **essenciais** para os edges que conectam hubs ao On-Premises. Sem eles, os tooltips e labels dessas linhas ficam zerados. Estes custos devem ser acumulados no **flows JSON** (não apenas no inventário de recursos), pois são usados diretamente pelos edges no diagrama.
+
+A classificação dentro de `MeterCategory = "ExpressRoute"` segue esta ordem:
+1. Se `MeterSubCategory` contém "Gateway" ou `MeterName` contém "ErGw" → `expressroute_gateway_cost`
+2. Se `MeterName` contém "Circuit" → `expressroute_circuit_cost`
+3. Se `MeterName` contém "Metered Data" (sem "Circuit") ou "Data Transfer" → `expressroute_out_gb/cost` ou `expressroute_in_gb/cost`
+4. Catch-all ER → `expressroute_out` (tráfego metered genérico)
+
+Para `MeterCategory = "VPN Gateway"` → acumular direto em `vpn_cost`.
 
 ### 1.2 Extração de Inventário de Recursos (CSV → JSON `_net_resources.json`)
 
@@ -93,29 +106,72 @@ Salvar como lista `_gateway_details` dentro do JSON de cada subscription, ordena
 
 **Deduplicar** por `ResourceName` (somar custos se houver múltiplas linhas para o mesmo recurso).
 
+### 1.4 Mapeamento Dinâmico de Componentes Não-Mapeados
+
+Os padrões listados nas seções 1.1, 1.2 e 1.3 cobrem os componentes de rede mais comuns, mas faturas de clientes podem conter **MeterCategory/MeterSubCategory/MeterName** ainda não previstos (ex: novos serviços Azure, SKUs regionais, variantes de naming).
+
+**Regra**: Se uma linha do CSV pertence a uma `MeterCategory` de rede (listada em `NET_CATS`) mas **não foi capturada** por nenhum dos acumuladores de fluxo (seção 1.1) nem por nenhum padrão de recurso (seção 1.2), ela **deve** ser:
+
+1. **Registrada no inventário** como tipo `other_network` com:
+   - `ResourceName` como identificador do recurso
+   - `MeterCategory + MeterSubCategory` como label de exibição
+   - `UnitOfMeasure` preservado (ex: "1 GB", "1 Hour", "10K Transactions")
+   - `Quantity` acumulado na unidade original
+   - `Cost` acumulado
+2. **Incluída no `total_net_cost`** do flow (já acontece naturalmente pois o custo é somado no início do loop)
+3. **Exibida no tooltip** do nó, na seção "🛡️ Serviços de Rede", com o label `MeterCategory - MeterSubCategory` e o custo total
+4. **Logada em console** durante a extração com `[UNMAPPED]` para facilitar a adição futura no prompt:
+   ```
+   [UNMAPPED] Sub=XYZ | Cat=Azure Bastion | SubCat=Standard | Name=Standard Data Transfer | Unit=1 GB | Cost=123.45
+   ```
+
+Isso garante que **nenhum custo de rede é silenciosamente descartado**, mesmo para serviços não previstos.
+
 ---
 
 ## 2. ARQUITETURA DO DIAGRAMA HTML
 
 ### 2.1 Tecnologias (inline, arquivo único)
 - **Google Fonts**: Inter + JetBrains Mono
-- **SVG**: Linhas de conexão (edges) com hit areas para hover
+- **SVG**: Linhas de conexão (edges) com hit areas para hover. **SVGs (`svgEdges` e `svgLabels`) devem estar DENTRO do `#world` div**, não como irmãos do `#world` dentro do `#canvas`. Isso garante que o `transform` (pan/zoom) seja aplicado uma única vez no `#world` e os SVGs acompanhem automaticamente sem drift.
 - **HTML divs**: Cada nó é um elemento DOM independente, arrastável
 - **CSS Custom Properties**: Dark/light theme
 - **JavaScript vanilla**: Drag & drop, pan, zoom, tooltips, regiões arrastáveis
 
+**Estrutura HTML correta do canvas:**
+```html
+<div id="canvas">
+  <div id="world">
+    <svg id="svgEdges" style="position:absolute;top:0;left:0;width:1px;height:1px;pointer-events:none;z-index:8;overflow:visible"></svg>
+    <svg id="svgLabels" style="position:absolute;top:0;left:0;width:1px;height:1px;pointer-events:none;z-index:20;overflow:visible"></svg>
+    <!-- region boxes e node divs são adicionados aqui via JS -->
+  </div>
+</div>
+```
+
+**IMPORTANTE**: O `transform` (translate + scale) é aplicado APENAS no `#world`. Como os SVGs estão dentro, eles herdam o transform automaticamente. **NÃO** aplicar transform separado nos SVGs — isso causa desalinhamento entre edges e nós ao fazer zoom ou pan.
+
 ### 2.2 Princípios de Layout
 
-1. **Hubs DENTRO da sua região** — subscriptions com ExpressRoute ou VPN Gateway são posicionadas no **topo da region box** da sua respectiva região Azure. Se houver mais de um hub na mesma região, distribuir horizontalmente no topo. **NÃO** posicionar hubs numa faixa separada fora das region boxes.
-2. **On-Premises** = posicionado na **base** do desenho (abaixo das regiões)
+1. **Hubs na PARTE INFERIOR da sua região** — subscriptions com ExpressRoute ou VPN Gateway são posicionadas na **base da region box** da sua respectiva região Azure (pois se conectam para baixo ao On-Premises). Se houver mais de um hub na mesma região, distribuir horizontalmente na base. **NÃO** posicionar hubs numa faixa separada fora das region boxes.
+2. **Spokes acima dos hubs** — subscriptions normais (spokes) são organizadas em grid **acima** dos hubs dentro da mesma region box.
+3. **On-Premises** = posicionado na **base** do desenho (abaixo das regiões)
 3. **Internet** = **um nó por região Azure** que tem tráfego de internet significativo, posicionado **acima** de cada região. Cada nó Internet mostra o custo de egress daquela região e, no tooltip, lista as subscriptions, tráfego agregado, e o total global de Internet. Preço de egress varia por região (Brasil ~2x mais caro que EUA) — essa separação é essencial para otimização.
-4. **Subscriptions normais (spokes)** = organizadas em grid abaixo do hub, dentro da mesma region box
+4. **Subscriptions normais (spokes)** = organizadas em grid acima dos hubs, dentro da mesma region box
 5. **Regiões Azure** = caixas tracejadas agrupando **TODAS** as subscriptions da mesma região (hubs + spokes). Posicionadas de forma a refletir geografia:
    - Regiões do Brasil (brazilsouth) = centro
    - Regiões dos EUA (EastUS, EastUS2, CentralUS, WestUS) = acima/direita
    - Regiões da Europa = acima/esquerda
    - Regiões da Ásia = direita
-6. **Top N subscriptions** mostradas individualmente (14-16); restante agregadas em nó "Outros (X subs)" com botão de **expandir/contrair**
+6. **Top N global + Top M per-region** — dois níveis de agregação:
+   - **Global**: Top 14-16 subscriptions por custo de rede são mostradas individualmente; restante agregadas em nó "Outros (X subs)" global com botão expandir/contrair
+   - **Per-region**: Dentro de cada region box, se houver mais de **6 spokes** (excluindo hubs), mostrar apenas os **top 6 por custo** e agregar o restante em um nó **"Outros (RegionLabel: X subs)"** dentro da própria region box
+   - O nó "Outros" per-region tem botão **expandir/contrair** que funciona independentemente do "Outros" global
+   - Ao expandir um "Outros" regional, os nós individuais aparecem **dentro da mesma region box**, que se redimensiona automaticamente
+   - Ao contrair, volta ao nó agregado sem afetar outras regiões
+   - O nó "Outros" regional mostra no tooltip a lista de subs agregadas com custo individual
+   - **Peering edges** das subs agregadas no "Outros" regional são somados no edge do nó agregado (como no "Outros" global)
+   - Constante `MAX_SPOKES_PER_REGION = 6` configurável
 7. **Collision avoidance em 3 fases** (ver seção 2.4)
 
 ### 2.4 Collision Avoidance — 3 Fases
@@ -197,10 +253,34 @@ Ao passar o mouse sobre qualquer caixa de subscription, exibir **tooltip flutuan
 
 ### 3.6 Hover/Tooltip nas Linhas (Edges)
 Ao passar o mouse sobre uma linha de conexão, exibir tooltip com:
-- Tipo de conexão (ExpressRoute, VNet Peering, Internet, Global Peering)
-- ⬇ DTO: volume + custo + explicação do que significa
-- ⬆ DTI: volume + custo ou "GRÁTIS" + explicação
-- Custo total da conexão
+- Tipo de conexão
+- **Custo total da conexão** (destaque) = soma de DTO + DTI + custos fixos de infraestrutura
+
+#### 3.6.1 Edge para On-Premises — APENAS ExpressRoute
+
+A linha para On-Premises existe **somente** para hubs com ExpressRoute. VPN Gateway **NÃO** gera linha para On-Premises — o tráfego VPN transita pela internet e é cobrado como Bandwidth genérica na fatura EA.
+
+O edge tipo `onprem` carrega:
+- DTO/DTI do ExpressRoute metered (volume + custo)
+- Custo fixo dos Circuitos ER (se > 0)
+
+O tooltip mostra:
+- Seção 🔌 ExpressRoute com DTO, DTI, custo dos circuitos e explicação
+
+**Estilo visual:** azul dashed (`stroke-dasharray: 12,6`)
+
+**Nó On-Premises:** mostrado apenas se existir pelo menos 1 hub com ExpressRoute (`erHubSubs.length > 0`). Se o cliente só tem VPN (sem ER), o nó On-Premises **não aparece**.
+
+#### 3.6.2 Edges de Peering/Internet
+- ⬇ DTO + ⬆ DTI com volumes e custos
+
+**IMPORTANTE**: O custo total do edge (`tc`) para cálculo de espessura e labels deve incluir **apenas**:
+- `doc + dic` (custos de data transfer ER metered)
+- `cir` (custo de circuitos ER, se houver)
+
+**NÃO incluir** no custo do edge:
+- `gwy` (custo de gateway ER) — pertence ao nó
+- `vpnc` (custo de VPN gateway) — pertence ao nó. O tráfego VPN não tem meter separado na fatura EA.
 
 ### 3.7 Posicionamento do Tooltip
 - Aparece a 18px à direita e 10px acima do cursor
@@ -213,13 +293,23 @@ Ao passar o mouse sobre uma linha de conexão, exibir tooltip com:
 - Durante o drag, **ignorar todos os eventos de hover** — `showTip` deve verificar se há drag ativo e retornar sem fazer nada
 - Tooltip volta a funcionar normalmente ao soltar o botão do mouse
 
-### 3.9 Expandir/Contrair nó "Outros"
+### 3.9 Expandir/Contrair nó "Outros" (Global)
 - O nó "Outros (X subs)" contém um **botão "📦 Expandir X subs"** dentro da caixa
 - No toolbar, há um **botão "📦 Expandir Outros"** / **"📦 Contrair Outros"**
 - **Expandir**: remove o nó "Outros" do diagrama e cria nós individuais para cada subscription agregada, com suas conexões e posições por região. O nó "Outros" desaparece.
 - **Contrair**: remove todos os nós expandidos e recria o nó "Outros" com custo e fluxos agregados. O nó "Outros" reaparece no diagrama.
 - Ciclo expandir/contrair deve funcionar múltiplas vezes sem bugs
 - **CUIDADO**: Ao contrair, limpar completamente o nó "Outros" de DATA, pos, byRegion e edges antes de recriá-lo
+- **Nós Internet dinâmicos**: Ao reconstruir edges (`rebuildEdges`), **substituir** o mapa `inetRegions` inteiro com o recém-calculado (não apenas adicionar). Isso garante que o nó "Internet (Mixed)" desapareça ao expandir (pois as subs individuais vão para suas regiões reais) e reapareça ao contrair (pois "Outros" usa região "mixed").
+
+### 3.9.1 Expandir/Contrair "Outros" Per-Region
+- Cada region box com mais de `MAX_SPOKES_PER_REGION` (6) spokes gera um nó **"Outros (RegionLabel: X subs)"** dentro da region box
+- Esse nó tem um **botão "📦 Expandir X subs"** que funciona **independentemente** do "Outros" global
+- **Expandir regional**: o nó agregado desaparece, os nós individuais aparecem dentro da mesma region box. A region box se redimensiona (`recalcRB()`). Edges são recalculados apenas para aquela região.
+- **Contrair regional**: os nós individuais desaparecem, o nó agregado volta. Region box encolhe.
+- Múltiplas regiões podem ter seus "Outros" expandidos/contraídos de forma independente
+- **Estado de expansão**: manter um mapa `regionExpanded = { rk: boolean }` para cada região. Ao fazer `resetLayout()`, restaurar todos para contraído.
+- **Interação com "Outros" global**: Ao expandir/contrair o "Outros" global, o estado de expansão per-region é **resetado** (todos voltam a contraído). Isso evita conflitos de estado.
 
 ### 3.10 Tooltip nos Nós de Internet
 - Cada nó Internet regional mostra no tooltip:
@@ -257,6 +347,12 @@ Ao passar o mouse sobre uma linha de conexão, exibir tooltip com:
 - **ExpressRoute**: `stroke-dasharray: 12,6`
 - **Labels**: Apenas em edges com custo > R$ 1.500, com fundo semi-transparente para legibilidade
 - **Hit area**: Linha invisível de 24px de largura para hover
+- **Anchor points de nós especiais**: As linhas de conexão devem se ancorar nos pontos lógicos de cada nó, não no centro:
+  - **On-Premises** (base da tela): linhas chegam pela **parte superior** da caixa (`y = pt.y`)
+  - **Internet** (topo da tela): linhas chegam pela **parte inferior** da caixa (`y = pt.y + pt.h`)
+  - **Hub → On-Prem**: a linha sai da **base** do hub (`y = pf.y + pf.h`)
+  - **Node → Internet**: a linha sai do **topo** do nó (`y = pf.y`)
+  - **Peering (node ↔ hub)**: usa o **centro** (`y = pos.y + pos.h/2`) em ambos os lados
 
 ### 4.4 Region Boxes
 - Border dashed com cor da região, border-radius 18px
@@ -343,9 +439,9 @@ O gerador deve funcionar automaticamente para:
 
 | Topologia | Como detectar | Layout |
 |---|---|---|
-| **Hub-spoke com ExpressRoute** | Subscription com `expressroute_circuit` ou `expressroute_gateway` | Hub no topo da region box, ER connection para On-Prem na base |
-| **Hub-spoke com VPN** | Subscription com `vpn_gateway` | Hub no topo da region box, VPN connection para On-Prem |
-| **Multi-hub** | Múltiplas subscriptions com ER ou VPN | Cada hub no topo da sua region box; se na mesma região, distribuir horizontalmente |
+| **Hub-spoke com ExpressRoute** | Subscription com `expressroute_circuit` ou `expressroute_gateway` | Hub na base da region box, ER connection para On-Prem |
+| **Hub-spoke com VPN** | Subscription com `vpn_gateway` | Hub na base da region box, **sem linha para On-Prem** — VPN transita pela internet |
+| **Multi-hub** | Múltiplas subscriptions com ER ou VPN | Cada hub na base da sua region box; se na mesma região, distribuir horizontalmente |
 | **Cloud-only (sem on-prem)** | Nenhuma subscription com ER/VPN | Sem nó On-Prem; hub é a subscription com mais peering |
 | **Multi-region** | Subscriptions em regiões diferentes | Agrupar por região com layout geográfico |
 | **Single-region** | Todas na mesma região | Layout simples em grid |
@@ -354,12 +450,13 @@ O gerador deve funcionar automaticamente para:
 1. Se há subscription com `expressroute_circuit` → é hub
 2. Se há subscription com `vpn_gateway` → é hub  
 3. Se nenhum ER/VPN, a subscription com mais `vnet_peering` ingress = hub
-4. Se múltiplos hubs **na mesma região**, distribuir horizontalmente no topo da region box
-5. Hubs em **regiões diferentes** ficam cada um no topo da sua respectiva region box
+4. Se múltiplos hubs **na mesma região**, distribuir horizontalmente na base da region box
+5. Hubs em **regiões diferentes** ficam cada um na base da sua respectiva region box
 
 ### Detecção de On-Premises
-- Se há custo de ExpressRoute ou VPN Gateway → mostrar nó On-Premises
-- Se não há → omitir nó On-Premises
+- Se há **ExpressRoute** (circuit ou gateway) → mostrar nó On-Premises
+- Se há apenas VPN (sem ER) → **NÃO** mostrar nó On-Premises (VPN transita pela internet)
+- Se não há ER nem VPN → omitir nó On-Premises
 
 ---
 
@@ -373,7 +470,7 @@ O gerador deve funcionar automaticamente para:
 - [ ] Regiões são arrastáveis (movem todos os nós dentro)
 - [ ] Nós individuais são arrastáveis (linhas acompanham)
 - [ ] Collision avoidance evita sobreposição
-- [ ] On-Premises na BASE, Internet **por região no TOPO**, Hub(s) **no topo da sua region box**
+- [ ] On-Premises na BASE, Internet **por região no TOPO**, Hub(s) **na base da sua region box**
 - [ ] Subscriptions agrupadas por região com caixas tracejadas (hubs + spokes dentro da mesma box)
 - [ ] Collision avoidance em 3 fases: intra-região → inter-região → especiais (NUNCA global indiscriminado)
 - [ ] Region boxes recalculadas pós-render com alturas reais do DOM
