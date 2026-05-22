@@ -164,26 +164,113 @@ Salvar como lista `_gateway_details` dentro do JSON de cada subscription, ordena
 
 **Deduplicar** por `ResourceName` (somar custos se houver múltiplas linhas para o mesmo recurso).
 
-### 1.4 Mapeamento Dinâmico de Componentes Não-Mapeados
+### 1.4 Mapeamento Autônomo de Componentes Não Previstos
 
 Os padrões listados nas seções 1.1, 1.2 e 1.3 cobrem os componentes de rede mais comuns, mas faturas de clientes podem conter **MeterCategory/MeterSubCategory/MeterName** ainda não previstos (ex: novos serviços Azure, SKUs regionais, variantes de naming).
 
-**Regra**: Se uma linha do CSV pertence a uma `MeterCategory` de rede (listada em `NET_CATS`) mas **não foi capturada** por nenhum dos acumuladores de fluxo (seção 1.1) nem por nenhum padrão de recurso (seção 1.2), ela **deve** ser:
+**Regra (NÃO usar bucket `other_network`)**: Se uma linha do CSV pertence a uma `MeterCategory` de rede (em `NET_CATS`) ou a um serviço de rede que deveria estar em `NET_CATS` mas **não foi capturada** por nenhum dos acumuladores de fluxo (seção 1.1) nem por nenhum padrão de recurso (seção 1.2), o agente **deve mapear e classificar autonomamente** o componente:
 
-1. **Registrada no inventário** como tipo `other_network` com:
-   - `ResourceName` como identificador do recurso
-   - `MeterCategory + MeterSubCategory` como label de exibição
-   - `UnitOfMeasure` preservado (ex: "1 GB", "1 Hour", "10K Transactions")
-   - `Quantity` acumulado na unidade original
-   - `Cost` acumulado
-2. **Incluída no `total_net_cost`** do flow (já acontece naturalmente pois o custo é somado no início do loop)
-3. **Exibida no tooltip** do nó, na seção "🛡️ Serviços de Rede", com o label `MeterCategory - MeterSubCategory` e o custo total
-4. **Logada em console** durante a extração com `[UNMAPPED]` para facilitar a adição futura no prompt:
+1. **Identificar a natureza do componente** com base em `MeterCategory + MeterSubCategory + MeterName + ConsumedService`:
+   - É um **fluxo de dados** (cobra por GB)? → criar acumulador de flow apropriado (egress/ingress, com `_gb` e `_cost`)
+   - É um **custo fixo de infraestrutura** (cobra por hora/mês)? → criar acumulador de cost simples
+   - É um **recurso gerenciável** (com `ResourceName` único)? → criar tipo de recurso no inventário
+2. **Adicionar a categoria a `NET_CATS`** se for um `MeterCategory` novo
+3. **Adicionar o padrão a `RES_PATTERNS`** se for um novo tipo de recurso (na posição correta de especificidade — mais específico primeiro)
+4. **Criar o acumulador de flow** no `flows[...]` defaultdict com nome semanticamente consistente com os existentes (snake_case, sufixo `_cost` / `_gb`)
+5. **Adicionar ao tooltip do nó** na seção apropriada (🛡️ Serviços de Rede / ☁️ Fluxos de Tráfego / 🔧 Recursos)
+6. **Adicionar como chip de filtro** em `RES_ICONS` e nos filtros por componente (seção 3.11) com ícone apropriado
+7. **Logar a decisão** em console durante a extração com prefixo `[AUTO-MAPPED]`:
    ```
-   [UNMAPPED] Sub=XYZ | Cat=Azure Bastion | SubCat=Standard | Name=Standard Data Transfer | Unit=1 GB | Cost=123.45
+   [AUTO-MAPPED] new flow accumulator 'azure_bastion_data_gb/cost' for: Cat=Azure Bastion | SubCat=Standard | Name=Standard Data Transfer | Unit=1 GB
    ```
 
-Isso garante que **nenhum custo de rede é silenciosamente descartado**, mesmo para serviços não previstos.
+**Alerta obrigatório ao fim da execução**: Se qualquer mapeamento autônomo foi criado, imprimir resumo:
+```
+⚠️  PROMPT UPDATE NEEDED — os seguintes mapeamentos foram criados autonomamente:
+  • Cat='Azure Bastion' SubCat='Standard' Name='Standard Data Transfer'
+      → flow accumulator: azure_bastion_data_gb/cost
+      → adicionar à seção 1.1 do prompt
+  • Cat='Azure DDoS Protection' Name='Standard Plan'
+      → resource pattern: ddos_protection
+      → adicionar à seção 1.2 do prompt
+Sugestão: atualizar prompt_network_topology.md com estes mapeamentos para que o classificador deixe de depender de inferência autônoma neste padrão.
+```
+
+Isso garante que **nenhum custo de rede vai para um bucket genérico** (`other_network` é descontinuado) e que o prompt evolua conforme novos serviços Azure aparecem nas faturas.
+
+---
+
+### 1.5 Atribuição de Região por Linha (Cascade A1→A2→A3→A4)
+
+**Regra fundamental**: Todo recurso de rede DEVE ser representado dentro dos limites visuais da sua região real. Uma subscription não é uma unidade geográfica — ela apenas contém recursos. A chave de acumulação NÃO é mais `SubscriptionName`, e sim a **tupla composta `(SubscriptionName, region_bucket)`**.
+
+Para cada linha do CSV em `NET_CATS`, decidir o `region_bucket` em **cascade**:
+
+| Etapa | Condição | Resultado |
+|---|---|---|
+| **A1** | `ResourceLocation` preenchido e válido (≠ `""`, `unassigned`, `unknown`, `all regions`, `global`, `zone N`) | Região Azure direta (ex: `brazilsouth`) |
+| **A2** | `ResourceLocation` vazio mas `ResourceName` ou `ResourceId` contém token de região conhecida | Região inferida (badge `região inferida pelo nome` no tooltip) |
+| **A3** | `MeterCategory` ∈ `{Azure DNS, Azure Front Door, Azure Front Door Service, CDN, Traffic Manager}` | Bucket sintético `__global__` |
+| **A4** | Nenhuma das anteriores | Bucket sintético `__shared__` (com alerta ⚠️) |
+
+**Lista mínima de tokens de região para A2** (lowercased substring match em `ResourceName + " " + ResourceId`):
+```
+brazilsouth, brazilsoutheast, eastus2, eastus, westus3, westus2, westus,
+centralus, southcentralus, northcentralus, westcentralus,
+canadacentral, canadaeast, northeurope, westeurope, uksouth, ukwest,
+francecentral, germanywestcentral, switzerlandnorth, swedencentral,
+norwayeast, italynorth, spaincentral, southeastasia, eastasia,
+japaneast, japanwest, koreacentral, koreasouth,
+australiaeast, australiasoutheast, centralindia, southindia, westindia,
+southafricanorth, uaenorth, qatarcentral, chilecentral, mexicocentral
+```
+
+**Acumulação**: `flows[(sub, bucket)]`, `resources[(sub, bucket)]`, `gateway_details[(sub, bucket)]` — cada tupla é independente. Uma subscription com recursos em 3 regiões gera 3 entradas.
+
+### 1.6 Merge Threshold (anti-fragmentação)
+
+Após a acumulação, aplicar threshold para evitar que ruído crie nós espúrios:
+
+- **Constante**: `MERGE_THRESHOLD = 1000.0` (em BRL ou moeda da fatura)
+- **Recursos estruturais** (que SEMPRE justificam manter o split, mesmo com custo baixo):
+  ```
+  expressroute_circuit, expressroute_gateway, vpn_gateway,
+  vwan_hub, vwan_er_gateway, vwan_vpn_gateway,
+  firewall, firewall_manager, app_gateway, nat_gateway
+  ```
+- **Algoritmo de merge** por subscription:
+  1. Identificar o **bucket dominante** = maior `total_net_cost` entre buckets de regiões reais (não `__global__`/`__shared__`). Fallback: maior bucket de qualquer tipo.
+  2. Para cada bucket secundário da mesma sub:
+     - Se `cost >= MERGE_THRESHOLD` → manter split
+     - Se contém recurso estrutural → manter split
+     - Se for `__global__` ou `__shared__` → manter split (nunca fundir em região real)
+     - Caso contrário → **fundir** flows + resources + gateway_details no bucket dominante
+
+### 1.7 Labels de Saída
+
+| Caso | Label emitido | Exemplo |
+|---|---|---|
+| Sub single-region após merge | `sub` | `AZR-FSW-SHD` |
+| Sub com 2+ buckets de região real | `sub@region` | `AZR-HUB-SHD@brazilsouth`, `AZR-HUB-SHD@eastus` |
+| Bucket global | `sub 🌐 Global` | `AZR-HUB-SHD 🌐 Global` |
+| Bucket shared/não atribuído | `sub ⚠ Shared` | `AZR-HUB-SHD ⚠ Shared` |
+
+Cada entrada exportada tem metadata adicional:
+- `_subscription`: nome original da sub
+- `_bucket`: região (`brazilsouth`, `eastus`, `__global__`, `__shared__`)
+- `_multi_region`: `true` se a sub aparece em mais de um bucket
+
+### 1.8 Configuração Visual das Regiões Sintéticas
+
+Em `REGION_CFG` do generator, adicionar:
+```js
+'__global__': {flag:'🌐', label:'Global (geo-distribuído)', color:'#6c7a92'},
+'__shared__': {flag:'⚠',  label:'Shared / Não atribuído',   color:'#f0a030'},
+```
+
+- **Region box `Global`** aparece sempre que houver pelo menos 1 entrada com bucket `__global__`. Hospeda DNS público, Front Door, Traffic Manager, CDN.
+- **Region box `Shared`** aparece **somente se houver custo não atribuível** (após A1+A2+A3 falharem). Borda laranja tracejada. Tooltip lista cada `MeterCategory + MeterName + Cost` para guiar correção futura do mapeamento.
+- **Toolbar**: contador `⚠ R$ X não atribuídos` visível quando houver entradas `__shared__`.
 
 ---
 
@@ -289,6 +376,10 @@ A função `recalcRB()` percorre `regionBoxes[rk].nodes`, lê `pos[id]` com `w` 
 ### 3.1 Drag & Drop de Nós
 - Cada caixa de subscription é arrastável individualmente
 - As linhas SVG de conexão acompanham o movimento em tempo real
+- **Containment automático**: ao arrastar um nó para fora da borda da sua region box, a region box **DEVE crescer automaticamente** para mantê-lo dentro. Implementação:
+  1. Função utilitária `nodeRegion(id)` que percorre `regionBoxes` e retorna o `rk` cuja `.nodes[]` contém o id (ignora nós especiais `__onprem__`, `__inet_*__`).
+  2. No handler de `mousemove` durante `dragState`, após atualizar `pos[id].x/y`, chamar `recalcRBBounds(ownerRk)` e atualizar `left/top/width/height` do `<div id="rb_{rk}">`.
+  3. A region box nunca encolhe abaixo do bounding box dos seus nós, mas pode crescer indefinidamente. Nenhum nó pode "escapar" visualmente do seu container.
 - Ao soltar, executar collision avoidance e redesenhar edges
 
 ### 3.2 Drag & Drop de Regiões
@@ -346,24 +437,43 @@ Ao passar o mouse sobre uma linha de conexão, exibir tooltip com:
 
 O `totalCost` no headline é a soma de todos (visão rápida), mas abaixo **cada componente aparece individualmente**.
 
-#### 3.6.1 Edges para On-Premises — ExpressRoute E VPN
+#### 3.6.1 Edges para On-Premises — ExpressRoute, VPN ou Ambos
 
-A linha para On-Premises existe para hubs com **ExpressRoute** e/ou **VPN Gateway** (incluindo Virtual WAN).
+A linha para On-Premises existe para hubs com **ExpressRoute** e/ou **VPN Gateway** (incluindo Virtual WAN). **Cada par hub→on-prem gera no máximo UMA linha visual**, com tipo escolhido em função do que o hub possui:
 
-**Edge tipo `onprem_er`** (ExpressRoute):
+**Edge tipo `onprem_er`** (hub somente com ExpressRoute):
 - DTO/DTI do ExpressRoute metered (volume + custo)
 - Custo fixo dos Circuitos ER (se > 0)
-- **Estilo visual:** azul dashed (`stroke-dasharray: 12,6`)
+- **Estilo visual:** azul `#4aa3e8` dashed (`stroke-dasharray: 12,6`)
 
-**Edge tipo `onprem_vpn`** (VPN):
+**Edge tipo `onprem_vpn`** (hub somente com VPN):
 - Custo fixo do VPN Gateway ou vWAN VPN S2S Scale Unit
 - Custo fixo do vWAN Hub (se aplicável)
-- **NÃO tem DTO/DTI** — tráfego VPN transita pela internet pública e é cobrado como Bandwidth genérica ("Standard Data Transfer Out") na fatura EA, sem meter separado
-- **Estilo visual:** cinza dotted (`stroke-dasharray: 6,4`, cor `#8b95ab`) — distinto do ER
+- **NÃO tem DTO/DTI** — tráfego VPN transita pela internet pública e é cobrado como Bandwidth genérica na fatura EA, sem meter separado
+- **Estilo visual:** cinza `#8b95ab` dotted (`stroke-dasharray: 6,4`)
 
-**Se o hub tem ER + VPN**, ambos edges aparecem (duas linhas para On-Premises, estilo visual diferente).
+**Edge tipo `onprem_mixed`** (hub com ExpressRoute E VPN — substitui os dois edges separados):
+- **Motivação**: se um hub gerar simultaneamente `onprem_er` e `onprem_vpn`, as duas linhas se sobrepõem visualmente entre os mesmos pontos e a segunda (VPN) intercepta o hover, escondendo os detalhes ER. **NUNCA** emitir dois edges para o mesmo par hub→on-prem.
+- **Conteúdo do edge** (todos os campos preservados):
+  - ER: `dto_gb`, `dto_cost`, `dti_gb`, `dti_cost`, `circuit_cost`, `gateway_cost`
+  - VPN: `vpn_cost`, `vwan_hub_cost`
+- **`total`** = soma de TODOS os componentes (ER DTO + DTI + Circuit + Gateway + VPN + vWAN Hub) — usado para espessura, label e headline do tooltip
+- **Estilo visual:** roxo `#a87de0` dashed (`stroke-dasharray: 10,5`) — distinto de ER e VPN puros
+- **Tooltip** com **duas seções visuais separadas**:
+  ```
+  🔌 ExpressRoute
+    ⬇ DTO (saída)         X GB · R$ Y
+    ⬆ DTI (entrada)       X GB · GRÁTIS
+    🔌 Circuito ER (fixo)  R$ Y
+    🔌 Gateway ER (fixo)   R$ Y
+  🔐 VPN
+    🔐 VPN Gateway (fixo)  R$ Y
+    🌐 vWAN Hub (fixo)     R$ Y
+  ```
+  Se VPN tiver custo fixo zero (gateway provisionado mas sem cobrança), mostrar linha `VPN sem custo fixo nesta linha` em itálico.
+- **Nota contextual obrigatória** no tooltip: "Este hub mantém ExpressRoute e VPN IPSec simultaneamente para On-Premises. ER = caminho primário com circuito dedicado; VPN = backup ou conectividade legada via internet pública. Custos de dados VPN aparecem como Bandwidth genérica na fatura EA (sem meter separado), portanto estão somados ao nó Internet, não aqui."
 
-O tooltip do edge VPN explica: "Túnel VPN IPSec — tráfego transita pela internet pública. O custo de dados VPN aparece como Bandwidth genérica na fatura EA, sem meter separado. O valor mostrado aqui é apenas a infraestrutura fixa do gateway."
+O tooltip do edge VPN puro explica: "Túnel VPN IPSec — tráfego transita pela internet pública. O custo de dados VPN aparece como Bandwidth genérica na fatura EA, sem meter separado. O valor mostrado aqui é apenas a infraestrutura fixa do gateway."
 
 **Nó On-Premises:** mostrado se existir pelo menos 1 hub com ExpressRoute OU VPN.
 
@@ -555,6 +665,7 @@ Painel lateral retrátil à direita (`#subPanel`, `width:280px`, `transform:tran
 - **Cores e estilos por tipo de edge**:
   - **ExpressRoute → On-Prem** (`onprem_er`): azul `#4aa3e8`, dashed (`stroke-dasharray: 12,6`)
   - **VPN → On-Prem** (`onprem_vpn`): cinza `#8b95ab`, dotted (`stroke-dasharray: 6,4`) — distinto do ER
+  - **ER + VPN → On-Prem** (`onprem_mixed`): roxo `#a87de0`, dashed (`stroke-dasharray: 10,5`) — usado quando o mesmo hub tem ambos (substitui os dois edges)
   - **Internet**: vermelho `#f05555`, sólido
   - **Inter-Region**: laranja `#f0a030`, dashed (`stroke-dasharray: 8,4`)
   - **Peering**: roxo `#a87de0`, sólido
@@ -732,20 +843,38 @@ O gerador deve funcionar automaticamente para:
 7. Hubs em **regiões diferentes** ficam cada um na base da sua respectiva region box
 
 ### Classificação de Hub para edges On-Premises
-- **erHubSubs**: hubs com `expressroute_circuit` OU `expressroute_gateway` OU `vwan_er_gateway` → geram edge tipo `onprem_er`
-- **vpnHubSubs**: hubs com `vpn_gateway` OU `vwan_vpn_gateway` → geram edge tipo `onprem_vpn`
-- Se um hub tem ER + VPN, ele aparece em **ambas** as listas e gera **dois edges** distintos para On-Premises
+- **erHubSubs**: hubs com `expressroute_circuit` OU `expressroute_gateway` OU `vwan_er_gateway`
+- **vpnHubSubs**: hubs com `vpn_gateway` OU `vwan_vpn_gateway`
+- **Seleção do tipo de edge** (UM único edge por par hub→on-prem):
+  - Hub apenas em `erHubSubs` → emitir edge `onprem_er`
+  - Hub apenas em `vpnHubSubs` → emitir edge `onprem_vpn`
+  - Hub em **ambas** as listas → emitir **um único edge `onprem_mixed`** com todos os campos ER + VPN (NUNCA dois edges separados — eles se sobrepõem e o segundo intercepta o hover)
 
 ### Detecção de On-Premises
-- Se há **ExpressRoute** (circuit, gateway, vWAN ER) → mostrar nó On-Premises + edge ER
-- Se há **VPN** (gateway, vWAN VPN S2S) → mostrar nó On-Premises + edge VPN
-- Se há ER + VPN → mostrar nó On-Premises com **ambos edges** (estilos visuais distintos)
+- Se há **ExpressRoute** (circuit, gateway, vWAN ER) → mostrar nó On-Premises + edge ER ou mixed
+- Se há **VPN** (gateway, vWAN VPN S2S) → mostrar nó On-Premises + edge VPN ou mixed
+- Se há ER + VPN no mesmo hub → edge `onprem_mixed`
+- Se há ER e VPN em hubs **diferentes** → cada hub gera seu próprio edge (ER de um, VPN do outro)
 - Se não há ER nem VPN → omitir nó On-Premises
 
 ---
 
 ## 7. CHECKLIST DE QUALIDADE
 
+- [ ] **Atribuição de região por linha**: cascade A1→A2→A3→A4 implementada (ResourceLocation → nome → `__global__` → `__shared__`)
+- [ ] Acumulação usa chave composta `(sub, region_bucket)` — nunca apenas `sub`
+- [ ] Merge threshold (`R$ 1.000` + sem recurso estrutural) funde buckets ruído no dominante
+- [ ] Recursos estruturais (ER GW/Circuit, VPN GW, vWAN Hub/ER/VPN, Firewall, FW Mgr, App GW, NAT GW) SEMPRE preservam o split mesmo com custo baixo
+- [ ] Labels de saída: `sub` (single), `sub@region` (multi), `sub 🌐 Global`, `sub ⚠ Shared`
+- [ ] Region box `🌐 Global` renderizada sempre que houver custos geo-distribuídos (DNS, FrontDoor, TM, CDN)
+- [ ] Region box `⚠ Shared` renderizada SOMENTE se houver custos não atribuíveis (com contador no toolbar)
+- [ ] **Mapeamento autônomo**: linhas não cobertas pelos padrões geram novos acumuladores/recursos/filtros automaticamente (`other_network` descontinuado)
+- [ ] Mapeamentos autônomos logados com `[AUTO-MAPPED]` e resumidos ao fim com alerta `⚠️ PROMPT UPDATE NEEDED`
+- [ ] **Containment do drag**: arrastar nó para fora da region box faz a region crescer automaticamente (via `nodeRegion()` + `recalcRBBounds()`)
+- [ ] **Edge `onprem_mixed`**: hub com ER + VPN gera UM único edge (nunca dois sobrepostos)
+- [ ] Tooltip do `onprem_mixed` mostra duas seções visuais (🔌 ExpressRoute + 🔐 VPN) com todos os componentes discriminados
+- [ ] `total` do edge mixed = DTO + DTI + Circuit + Gateway + VPN + vWAN Hub
+- [ ] Edge mixed com estilo visual distinto: roxo `#a87de0` dashed `10,5`
 - [ ] Todas as setas ⬇=DTO(cobra), ⬆=DTI(grátis) — **NUNCA inverter**
 - [ ] Custos de natureza diferente NUNCA somados em uma única linha (DTO, Circuit, Gateway são linhas separadas)
 - [ ] On-Premises card mostra chips separados para DTO, Circuit, Gateway (não um número único misturado)
