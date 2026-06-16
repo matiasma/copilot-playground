@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Messenger — Carteiro do Planetinha</title>
+  <link rel="stylesheet" href="src/style.css" />
+  <!-- Three.js loaded as an ES module via import map (no build step required).
+       Vendored locally under vendor/three so the game runs fully offline. -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "./vendor/three/build/three.module.js"
+    }
+  }
+  </script>
+</head>
+<body>
+  <!-- 3D canvas is created by Three.js and inserted here -->
+  <div id="game-root"></div>
+
+  <!-- ===== Loading screen ===== -->
+  <div id="loading-screen">
+    <div class="loading-card">
+      <div class="logo">✉️ Messenger</div>
+      <div class="subtitle">Carteiro do Planetinha</div>
+      <div class="progress-track"><div id="progress-bar"></div></div>
+      <div id="loading-tip">Preparando o planeta…</div>
+    </div>
+  </div>
+
+  <!-- ===== Start screen ===== -->
+  <div id="start-screen" class="hidden">
+    <div class="start-card">
+      <h1>✉️ Messenger</h1>
+      <p class="tagline">Um joguinho relaxante de entregas num planeta minúsculo.</p>
+      <label class="field">
+        Seu nome
+        <input id="player-name" type="text" maxlength="14" placeholder="Carteiro" />
+      </label>
+      <details class="api-config">
+        <summary>Diálogos com IA (opcional — Claude claude-opus-4.8)</summary>
+        <p class="hint">
+          Cole uma API key da Anthropic para que os NPCs tenham falas geradas
+          dinamicamente. Sem chave, o jogo usa diálogos escritos à mão e funciona
+          100% offline. A chave fica só no seu navegador.
+        </p>
+        <input id="api-key" type="password" placeholder="sk-ant-..." autocomplete="off" />
+      </details>
+      <button id="start-button">Começar a entregar</button>
+      <div class="controls-hint">
+        <strong>Controles:</strong> WASD / setas para andar · Espaço para pular ·
+        Mouse (arrastar) para girar a câmera · E para falar/entregar ·
+        Segure Q para emojis · No celular use o joystick.
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== In-game HUD ===== -->
+  <div id="hud" class="hidden">
+    <div id="quest-tracker">
+      <div class="quest-icon">✉️</div>
+      <div class="quest-text">
+        <div class="quest-title">Nenhuma entrega</div>
+        <div class="quest-sub">Explore e encontre alguém precisando de ajuda.</div>
+      </div>
+    </div>
+
+    <div id="direction-arrow" class="hidden">➤</div>
+
+    <div id="interact-prompt" class="hidden"><span class="key">E</span> Falar</div>
+
+    <div id="inventory" class="hidden">
+      <div class="inv-item">📦</div>
+    </div>
+
+    <!-- Speech bubbles get appended here, positioned over the 3D world -->
+    <div id="bubble-layer"></div>
+
+    <!-- Top-right buttons -->
+    <div id="top-buttons">
+      <button id="btn-customize" title="Customizar (C)">👕</button>
+      <button id="btn-emote" title="Emojis (Q)">😀</button>
+      <button id="btn-settings" title="Configurações">⚙️</button>
+    </div>
+
+    <!-- Emoji wheel -->
+    <div id="emoji-wheel" class="hidden"></div>
+
+    <!-- Mobile joystick -->
+    <div id="joystick-zone" class="hidden">
+      <div id="joystick-base"><div id="joystick-thumb"></div></div>
+    </div>
+    <div id="mobile-buttons" class="hidden">
+      <button id="btn-jump">⤴</button>
+      <button id="btn-action">E</button>
+    </div>
+
+    <div id="toast"></div>
+  </div>
+
+  <!-- ===== Customization panel ===== -->
+  <div id="customize-panel" class="hidden">
+    <div class="panel-head">
+      <h2>Customização</h2>
+      <button id="close-customize">✕</button>
+    </div>
+    <div id="customize-options"></div>
+  </div>
+
+  <!-- ===== Settings panel ===== -->
+  <div id="settings-panel" class="hidden">
+    <div class="panel-head">
+      <h2>Configurações</h2>
+      <button id="close-settings">✕</button>
+    </div>
+    <label class="field">Volume da música <input id="music-volume" type="range" min="0" max="100" value="55" /></label>
+    <label class="field">Volume dos efeitos <input id="sfx-volume" type="range" min="0" max="100" value="70" /></label>
+    <label class="field checkbox"><input id="quality-toggle" type="checkbox" checked /> Qualidade alta (sombras)</label>
+    <p class="hint">Dica: encontre todos os 5 destinatários e procure os segredos escondidos pelo planeta. 👽</p>
+  </div>
+
+  <script type="module" src="src/main.js"></script>
+</body>
+</html>
